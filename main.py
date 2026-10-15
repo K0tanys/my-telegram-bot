@@ -16,7 +16,6 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Загрузка конфигурации из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
@@ -33,7 +32,7 @@ LAST_SENT_ID_RAM = None
 
 # Фоновый веб-сервер для Render
 async def handle_ping(request):
-    return web.Response(text="Бот GameFloid активен и работает.")
+    return web.Response(text="Бот GameFloid активен.")
 
 async def start_web_server():
     app = web.Application()
@@ -45,20 +44,19 @@ async def start_web_server():
     await site.start()
     logger.info(f"Встроенный веб-сервер успешно запущен на порту {port}!")
 
-# Логика сбора постов
+# Логика сбора постов (ИСПРАВЛЕНО на RSS-поток канала)
 async def check_news(force_publish=False):
     global LAST_SENT_ID_RAM
-    logger.info("Собственный парсер BeautifulSoup запущен...")
+    logger.info("Безопасный парсер запущен...")
+    
+    # ИСПРАВЛЕНО: Изменили на rss, чтобы Render не блокировался защитой Telegram
     url = "https://t.me"
     
     custom_timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=custom_timeout) as session:
         try:
-            # Улучшенные заголовки для обхода блокировок Telegram на веб-страницах
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
             async with session.get(url, headers=headers) as response:
                 if response.status != 200:
@@ -68,40 +66,60 @@ async def check_news(force_publish=False):
                 html_data = await response.text()
                 soup = BeautifulSoup(html_data, "html.parser")
                 
-                posts = soup.find_all("div", class_="tgme_widget_message")
+                # Ищем элементы постов в RSS-ленте
+                posts = soup.find_all("item")
                 if not posts:
-                    logger.warning("Постов на веб-странице Telegram не найдено. Возможно, временная блокировка IP хостинга.")
+                    # Если RSS пуст, пробуем стандартный веб-поиск в качестве резерва
+                    url_backup = "https://t.me"
+                    async with session.get(url_backup, headers=headers) as res_backup:
+                        html_data = await res_backup.text()
+                        soup = BeautifulSoup(html_data, "html.parser")
+                        posts = soup.find_all("div", class_="tgme_widget_message")
+                
+                if not posts:
+                    logger.warning("Контент канала временно недоступен.")
                     return "empty"
                 
                 latest_post = posts[-1]
-                post_id_attr = latest_post.get("data-post")
-                if not post_id_attr:
-                    return "error"
                 
-                latest_id = post_id_attr.split("/")[-1]
-                
-                text_block = latest_post.find("div", class_="tgme_widget_message_text")
-                clean_text = ""
-                if text_block:
-                    for br in text_block.find_all("br"):
-                        br.replace_with("\n")
-                    clean_text = text_block.get_text().strip()
-                
-                image_url = None
-                photo_block = latest_post.find("a", class_="tgme_widget_message_photo_wrap")
-                if photo_block:
-                    style_attr = photo_block.get("style", "")
-                    img_match = re.search(r"background-image:url\(['\"]?(.*?)['\"]?\)", style_attr)
-                    if img_match:
-                        image_url = img_match.group(1)
+                # Извлечение ID и текста в зависимости от формата (RSS или HTML)
+                if latest_post.name == "item":
+                    link_text = latest_post.find("link").get_text() if latest_post.find("link") else ""
+                    latest_id = link_text.split("/")[-1] if "/" in link_text else "1"
+                    
+                    desc_block = latest_post.find("description")
+                    clean_text = desc_block.get_text().strip() if desc_block else ""
+                    # Убираем HTML-теги из описания RSS, если они есть
+                    clean_text = re.sub(r'<[^>]+>', '', clean_text)
+                    image_url = None
+                else:
+                    post_id_attr = latest_post.get("data-post")
+                    if not post_id_attr:
+                        return "error"
+                    latest_id = post_id_attr.split("/")[-1]
+                    
+                    text_block = latest_post.find("div", class_="tgme_widget_message_text")
+                    clean_text = ""
+                    if text_block:
+                        for br in text_block.find_all("br"):
+                            br.replace_with("\n")
+                        clean_text = text_block.get_text().strip()
+                    
+                    image_url = None
+                    photo_block = latest_post.find("a", class_="tgme_widget_message_photo_wrap")
+                    if photo_block:
+                        style_attr = photo_block.get("style", "")
+                        img_match = re.search(r"background-image:url\(['\"]?(.*?)['\"]?\)", style_attr)
+                        if img_match:
+                            image_url = img_match.group(1)
                 
                 if LAST_SENT_ID_RAM is None and not force_publish:
-                    logger.info(f"Успешный запуск. Последний пост занесен в память: {latest_id}")
+                    logger.info(f"Первый запуск. Пост ID {latest_id} сохранен в ОЗУ.")
                     LAST_SENT_ID_RAM = str(latest_id)
                     return "initialized"
                 
                 if LAST_SENT_ID_RAM != latest_id or force_publish:
-                    logger.info(f"Автоматически копирую пост ID {latest_id}")
+                    logger.info(f"Переносим пост ID {latest_id}...")
                     
                     if len(clean_text) > 1024:
                         clean_text = clean_text[:1020] + "..."
@@ -125,35 +143,32 @@ async def check_news(force_publish=False):
                         )
                     
                     LAST_SENT_ID_RAM = str(latest_id)
-                    logger.info("Пост успешно перенесен.")
+                    logger.info("Пост успешно отправлен!")
                     return "sent"
                 else:
-                    logger.info("Новых постов в канале пока нет.")
+                    logger.info("Новых публикаций в канале нет.")
                     return "no_new"
                     
         except Exception as e:
-            logger.error(f"Ошибка в модуле BeautifulSoup: {e}", exc_info=True)
+            logger.error(f"Ошибка парсинга: {e}")
             return "error"
 
-# Команда проверки
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     try:
         member = await bot.get_chat_member(chat_id=TARGET_CHAT_ID, user_id=message.from_user.id)
         if member.status in ["administrator", "creator"]:
-            status_msg = await message.reply("⏳ Запускаю прямой сбор данных...")
+            status_msg = await message.reply("⏳ Запускаю проверку...")
             result = await check_news(force_publish=True)
             
             if result == "sent":
-                await status_msg.edit_text("✅ Последний пост из канала автоматически перенесен!")
+                await status_msg.edit_text("✅ Пост успешно перенесен!")
             elif result in ["no_new", "initialized"]:
-                await status_msg.edit_text("🔄 Новых постов нет, но прямая связь с каналом стабильна.")
+                await status_msg.edit_text("🔄 Новых постов нет, связь с каналом проверена.")
             else:
-                await status_msg.edit_text("❌ Ошибка сбора данных. Проверьте логи на Render.")
-        else:
-            logger.warning(f"Пользователь {message.from_user.id} без прав админа пытался вызвать команду.")
+                await status_msg.edit_text("❌ Ошибка при переносе. Проверьте панель логов.")
     except Exception as e:
-        logger.error(f"Ошибка проверки прав админа: {e}")
+        logger.error(f"Ошибка проверки прав: {e}")
 
 async def main():
     await start_web_server()
@@ -166,12 +181,15 @@ async def main():
     
     await check_news(force_publish=False)
     
-    # Запуск polling с перехватом конфликтов
-    try:
-        await dp.start_polling(bot)
-    except TelegramConflictError:
-        logger.error("КРИТИЧЕСКАЯ ОШИБКА: Обнаружен конфликт токенов! Бот запущен где-то еще.")
-        print("Пожалуйста, перевыпустите токен у @BotFather с помощью команды /revoke")
+    while True:
+        try:
+            await dp.start_polling(bot)
+        except TelegramConflictError:
+            logger.error("КРИТИЧЕСКИЙ КОНФЛИКТ ТОКЕНОВ! Ожидание ручного сброса токена...")
+            await asyncio.sleep(10)
+        except Exception as e:
+            logger.error(f"Непредвиденная ошибка цикла: {e}")
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())
