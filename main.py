@@ -29,7 +29,7 @@ LAST_SENT_ID_RAM = None
 
 # --- Фоновый веб-сервер для Render ---
 async def handle_ping(request):
-    return web.Response(text="Бот GameFloid активен и использует большие таймауты!")
+    return web.Response(text="Бот GameFloid активен и использует правильные таймауты!")
 
 async def start_web_server():
     app = web.Application()
@@ -81,11 +81,10 @@ def clean_html_tags(html_text):
     cleaned = re.sub(r'<[^>]+>', '', cleaned)
     return unescape(cleaned).strip()
 
-# --- Проверка RSS-ленты с тремя зеркалами и долгим таймаутом ---
+# --- Проверка RSS-ленты с правильным долгим ожиданиям ---
 async def check_news(force_publish=False):
     logger.info("Запуск глубокой проверки RSS-ленты...")
     
-    # 3 независимых публичных зеркала
     urls = [
         "https://slarker.me",
         "https://rssforever.com",
@@ -93,24 +92,28 @@ async def check_news(force_publish=False):
     ]
     
     xml_data = None
-    for url in urls:
-        try:
-            logger.info(f"Подключаюсь к: {url} (ожидание до 30 секунд)...")
-            async with aiohttp.ClientSession() as session:
-                # Увеличили таймаут до честных 30 секунд для полной прогрузки
-                async with session.get(url, timeout=30) as response:
+    
+    # Настраиваем жесткий честный таймаут на 30 секунд общего времени на один запрос
+    custom_timeout = aiohttp.ClientTimeout(total=30)
+    
+    # Создаем ОДНУ общую сессию на все запросы
+    async with aiohttp.ClientSession(timeout=custom_timeout) as session:
+        for url in urls:
+            try:
+                logger.info(f"Подключаюсь к: {url} (честное ожидание до 30 секунд)...")
+                async with session.get(url) as response:
                     if response.status == 200:
                         xml_data = await response.text()
                         logger.info(f"Успешно скачали данные от {url}")
                         break
                     else:
-                        logger.warning(f"Сервер {url} ответил статусом {response.status}")
-        except Exception as e:
-            logger.warning(f"Сервер {url} не ответил за отведенное время: {e}")
-            continue
+                        logger.warning(f"Сервер {url} ответил статусом {response.status}, иду к следующему...")
+            except Exception as e:
+                logger.warning(f"Сервер {url} не ответил или сбросил соединение: {e}")
+                continue  # Сразу пробуем следующее зеркало, если это полностью упало
             
     if not xml_data:
-        logger.error("Ни одно из 3 зеркал не успело ответить.")
+        logger.error("Ни одно из 3 зеркал не выдало ответ.")
         return "error"
         
     try:
@@ -174,14 +177,14 @@ async def cmd_chek(message: Message):
         member = await bot.get_chat_member(chat_id=TARGET_CHAT_ID, user_id=message.from_user.id)
         
         if member.status in ["administrator", "creator"]:
-            status_msg = await message.reply("⏳ Связываюсь с серверами новостей (это может занять до 30 сек). Забираю пост...")
+            status_msg = await message.reply("⏳ Связываюсь с серверами новостей. Теперь честно жду до 30 секунд...")
             
             result = await check_news(force_publish=True)
             
             if result == "sent":
                 await status_msg.edit_text("✅ Последний актуальный пост из канала успешно доставлен!")
             else:
-                await status_msg.edit_text("❌ Все серверы-зеркала сейчас перегружены или не успели ответить. Попробуйте еще раз.")
+                await status_msg.edit_text("❌ Все серверы-зеркала сейчас перегружены или отклонили запрос. Попробуйте еще раз.")
         else:
             logger.warning(f"Пользователь {message.from_user.id} без прав админа ввел /chek")
     except Exception as e:
