@@ -25,11 +25,12 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-LAST_SENT_ID_RAM = None
+# Храним ID последних отправленных постов в памяти (чтобы избежать дубликатов)
+SENT_IDS_POOL = set()
 
 # --- Фоновый веб-сервер для Render ---
 async def handle_ping(request):
-    return web.Response(text="Бот GameFloid активен и работает стабильно!")
+    return web.Response(text="Бот GameFloid активен и готов к парсингу 3 постов!")
 
 async def start_web_server():
     app = web.Application()
@@ -55,13 +56,10 @@ def clean_html_tags(html_text):
     cleaned = re.sub(r'<br\s*/?>', '\n', cleaned)
     return cleaned.strip()
 
-# --- Главная функция проверки RSS-ленты ---
-async def check_news(force=False):
-    logger.info("Запуск проверки RSS-ленты...")
-    
-    # Используем стабильное и быстрое зеркало hub.slarker.me
+# --- Функция проверки RSS-ленты (Берет 3 последних поста) ---
+async def check_news(force_publish=False):
+    logger.info("Запуск проверки RSS-ленты (сканируем последние посты)...")
     rss_url = f"https://slarker.me{SOURCE_CHANNEL}"
-    logger.info(f"Подключаюсь к: {rss_url}")
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -74,30 +72,37 @@ async def check_news(force=False):
                 root = ET.fromstring(xml_data)
                 items = root.findall(".//item")
                 if not items:
-                    logger.info("Новых записей в ленте пока нет.")
+                    logger.info("Лента новостей пуста.")
                     return "empty"
                 
-                latest_item = items[0]
-                latest_id = latest_item.find("link").text if latest_item.find("link") is not None else latest_item.find("guid").text
-                raw_description = latest_item.find("description").text
+                # Берем до 3 самых свежих постов из начала ленты
+                target_items = items[:3]
                 
-                global LAST_SENT_ID_RAM
+                # Чтобы посты публиковались в правильном хронологическом порядке (от старого к новому),
+                # разворачиваем список задом наперед
+                target_items.reverse()
                 
-                if LAST_SENT_ID_RAM is None and not force:
-                    logger.info(f"Первый запуск. Запомнили последний пост с ID: {latest_id}")
-                    LAST_SENT_ID_RAM = str(latest_id)
-                    return "initialized"
+                posts_sent_count = 0
+                thread_id = TOPIC_ID if TOPIC_ID != 0 else None
                 
-                if LAST_SENT_ID_RAM != latest_id or force:
-                    logger.info("Отправка публикации в Telegram...")
+                global SENT_IDS_POOL
+                
+                for item in target_items:
+                    post_id = item.find("link").text if item.find("link") is not None else item.find("guid").text
+                    raw_description = item.find("description").text
+                    
+                    # Если этот пост мы уже отправляли И это не принудительный ручной тест команды /chek
+                    if post_id in SENT_IDS_POOL and not force_publish:
+                        continue
+                    
+                    logger.info(f"Обработка публикации {post_id}...")
                     image_url = extract_image_url(raw_description)
                     clean_text = clean_html_tags(raw_description)
                     
                     if len(clean_text) > 1024:
                         clean_text = clean_text[:1020] + "..."
                     
-                    thread_id = TOPIC_ID if TOPIC_ID != 0 else None
-                    
+                    # Отправка медиа или текста в Telegram
                     if image_url:
                         await bot.send_photo(
                             chat_id=TARGET_CHAT_ID,
@@ -113,44 +118,57 @@ async def check_news(force=False):
                             message_thread_id=thread_id,
                             parse_mode=ParseMode.HTML
                         )
-                    LAST_SENT_ID_RAM = str(latest_id)
-                    logger.info("Пост успешно переслан.")
+                    
+                    # Запоминаем ID, чтобы не слать повторно по таймеру
+                    SENT_IDS_POOL.add(post_id)
+                    posts_sent_count += 1
+                    # Небольшая пауза между отправками, чтобы Telegram не ругался на спам
+                    await asyncio.sleep(2)
+                
+                if posts_sent_count > 0:
+                    logger.info(f"Успешно опубликовано постов: {posts_sent_count}")
                     return "sent"
                 else:
-                    logger.info("Новых постов не выходило.")
+                    logger.info("Новых публикаций с момента прошлой проверки не появилось.")
                     return "no_new"
+                    
         except Exception as e:
-            logger.error(f"Ошибка при проверке новостей: {e}", exc_info=True)
+            logger.error(f"Ошибка при обработке новостей: {e}", exc_info=True)
             return "error"
 
-# --- ОБРАБОТЧИК КОМАНДЫ ДЛЯ АДМИНИСТРАТОРОВ ---
+# --- ОБРАБОТЧИК КОМАНДЫ /chek ДЛЯ АДМИНИСТРАТОРОВ ---
 @dp.message(Command("chek"))
 async def cmd_chek(message: Message):
     try:
         member = await bot.get_chat_member(chat_id=TARGET_CHAT_ID, user_id=message.from_user.id)
         
         if member.status in ["administrator", "creator"]:
-            status_msg = await message.reply("⏳ Проверяю ленту новостей через зеркало...")
+            status_msg = await message.reply("⏳ Запускаю сканирование ленты. Собираю 3 последних поста...")
             
-            result = await check_news(force=True)
+            # Передаем True, чтобы бот принудительно выгрузил 3 верхних поста для теста
+            result = await check_news(force_publish=True)
             
             if result == "sent":
-                await status_msg.edit_text("✅ Проверка завершена. Последний пост отправлен в тред!")
-            elif result == "no_new" or result == "initialized":
-                await status_msg.edit_text("🔄 Новых постов в канале нет, но я проверил — связь с сервером отличная!")
+                await status_msg.edit_text("✅ Проверка завершена! 3 последних поста успешно отправлены в вашу тему форума.")
+            elif result == "empty" or result == "no_new":
+                await status_msg.edit_text("🔄 Связь с сервером есть, но постов в ленте не найдено.")
             else:
-                await status_msg.edit_text("❌ Сервер новостей сейчас перегружен. Попробуйте еще раз через минуту.")
+                await status_msg.edit_text("❌ Зеркало новостей временно перегружено. Попробуйте еще раз через минуту.")
         else:
-            logger.warning(f"Пользователь {message.from_user.id} без прав админа пытался прописать /chek")
+            logger.warning(f"Пользователь {message.from_user.id} без прав админа ввел /chek")
     except Exception as e:
         logger.error(f"Ошибка проверки прав админа: {e}")
 
 async def main():
     await start_web_server()
+    
+    # Автоматическая проверка каждые 10 минут
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
     
-    await check_news()
+    # При самом первом "холодном" старте в облаке бот сразу соберет текущие 3 поста и запомнит их
+    await check_news(force_publish=False)
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
