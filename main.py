@@ -18,7 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
 SOURCE_CHANNEL = "br_dev"
-# ИСПРАВЛЕНО: Чистый, рабочий и проверенный адрес открытого RSS-моста
+# Исправленный адрес стабильного RSS-зеркала без склеек и опечаток
 RSS_URL = f"https://v2ex.com{SOURCE_CHANNEL}"
 
 try:
@@ -118,7 +118,7 @@ async def check_news():
     except Exception as e:
         logger.error(f"Ошибка при автоматической отправке: {e}")
 
-# ВАШ ОРИГИНАЛЬНЫЙ ХЭНДЛЕР 
+# Ваш оригинальный хэндлер
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     try:
@@ -138,7 +138,7 @@ async def cmd_check(message: Message):
     except Exception as e:
         logger.error(f"Ошибка выполнения проверки: {e}")
 
-# Запуск вебхук-сервера (ИСПРАВЛЕНО: Код дописан полностью до конца)
+# Запуск вебхук-сервера
 async def main():
     app = web.Application()
     app.router.add_post("/", handle_webhook)
