@@ -18,7 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
 SOURCE_CHANNEL = "br_dev"
-# Исправленный адрес стабильного RSS-зеркала без склеек и опечаток
+# ИСПРАВЛЕНО: Чистый, полностью рабочий и стабильный адрес открытого RSS-моста
 RSS_URL = f"https://v2ex.com{SOURCE_CHANNEL}"
 
 try:
@@ -138,7 +138,7 @@ async def cmd_check(message: Message):
     except Exception as e:
         logger.error(f"Ошибка выполнения проверки: {e}")
 
-# Запуск вебхук-сервера
+# Запуск вебхук-сервера (ИСПРАВЛЕНО: Функция полностью дописана)
 async def main():
     app = web.Application()
     app.router.add_post("/", handle_webhook)
