@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramConflictError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -19,7 +20,6 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
-# Безопасное приведение TOPIC_ID к числу
 try:
     TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
 except (ValueError, TypeError):
@@ -29,12 +29,11 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# ID последнего отправленного поста в ОЗУ
 LAST_SENT_ID_RAM = None
 
-# Фоновый веб-сервер для удовлетворения проверок Render
+# Фоновый веб-сервер для Render
 async def handle_ping(request):
-    return web.Response(text="Бот GameFloid активен и работает через собственный пинг.")
+    return web.Response(text="Бот GameFloid активен и работает.")
 
 async def start_web_server():
     app = web.Application()
@@ -46,7 +45,7 @@ async def start_web_server():
     await site.start()
     logger.info(f"Встроенный веб-сервер успешно запущен на порту {port}!")
 
-# Собственная логика прямого сбора постов через BeautifulSoup
+# Логика сбора постов
 async def check_news(force_publish=False):
     global LAST_SENT_ID_RAM
     logger.info("Собственный парсер BeautifulSoup запущен...")
@@ -55,20 +54,23 @@ async def check_news(force_publish=False):
     custom_timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=custom_timeout) as session:
         try:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            # Улучшенные заголовки для обхода блокировок Telegram на веб-страницах
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3"
+            }
             async with session.get(url, headers=headers) as response:
                 if response.status != 200:
                     logger.error(f"Telegram вернул статус: {response.status}")
                     return "error"
                 
                 html_data = await response.text()
-                
-                # ИСПРАВЛЕНО: Используем стандартный html.parser, встроенный в Python (не требует lxml)
                 soup = BeautifulSoup(html_data, "html.parser")
                 
                 posts = soup.find_all("div", class_="tgme_widget_message")
                 if not posts:
-                    logger.warning("Постов на веб-странице Telegram не найдено.")
+                    logger.warning("Постов на веб-странице Telegram не найдено. Возможно, временная блокировка IP хостинга.")
                     return "empty"
                 
                 latest_post = posts[-1]
@@ -78,7 +80,6 @@ async def check_news(force_publish=False):
                 
                 latest_id = post_id_attr.split("/")[-1]
                 
-                # Вытаскиваем текст поста
                 text_block = latest_post.find("div", class_="tgme_widget_message_text")
                 clean_text = ""
                 if text_block:
@@ -86,7 +87,6 @@ async def check_news(force_publish=False):
                         br.replace_with("\n")
                     clean_text = text_block.get_text().strip()
                 
-                # Вытаскиваем ссылку на картинку
                 image_url = None
                 photo_block = latest_post.find("a", class_="tgme_widget_message_photo_wrap")
                 if photo_block:
@@ -108,7 +108,6 @@ async def check_news(force_publish=False):
                     
                     thread_id = TOPIC_ID if TOPIC_ID != 0 else None
                     
-                    # ИСПРАВЛЕНО: aiogram 3.x принимает прямую ссылку строкой
                     if image_url:
                         await bot.send_photo(
                             chat_id=TARGET_CHAT_ID,
@@ -136,7 +135,7 @@ async def check_news(force_publish=False):
             logger.error(f"Ошибка в модуле BeautifulSoup: {e}", exc_info=True)
             return "error"
 
-# ОБРАБОТЧИК КОМАНДЫ /check ДЛЯ АДМИНИСТРАТОРОВ (Опечатка исправлена)
+# Команда проверки
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     try:
@@ -150,28 +149,29 @@ async def cmd_check(message: Message):
             elif result in ["no_new", "initialized"]:
                 await status_msg.edit_text("🔄 Новых постов нет, но прямая связь с каналом стабильна.")
             else:
-                await status_msg.edit_text("❌ Ошибка сбора данных. Попробуйте еще раз или проверьте логи.")
+                await status_msg.edit_text("❌ Ошибка сбора данных. Проверьте логи на Render.")
         else:
             logger.warning(f"Пользователь {message.from_user.id} без прав админа пытался вызвать команду.")
     except Exception as e:
         logger.error(f"Ошибка проверки прав админа: {e}")
 
 async def main():
-    # Запуск сервера контроля доступности
     await start_web_server()
     
-    # Сброс возможных старых вебхуков, чтобы не вызывать конфликты сессий
+    # Полная очистка вебхуков и зависших обновлений перед стартом
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Автоматическая проверка каждые 10 минут
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
     
-    # Первичный запуск парсера
     await check_news(force_publish=False)
     
-    # Старт получения обновлений
-    await dp.start_polling(bot)
+    # Запуск polling с перехватом конфликтов
+    try:
+        await dp.start_polling(bot)
+    except TelegramConflictError:
+        logger.error("КРИТИЧЕСКАЯ ОШИБКА: Обнаружен конфликт токенов! Бот запущен где-то еще.")
+        print("Пожалуйста, перевыпустите токен у @BotFather с помощью команды /revoke")
 
 if __name__ == "__main__":
     asyncio.run(main())
