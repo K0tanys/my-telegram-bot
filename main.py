@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 # Загрузка конфигурации из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
-SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "br_dev").strip().lstrip("@")
 TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
 
 bot = Bot(token=BOT_TOKEN)
@@ -41,14 +40,14 @@ async def start_web_server():
     await site.start()
     logger.info(f"Встроенный сервер успешно запущен на порту {port}!")
 
-# --- ПРЯМОЙ ПАРСИНГ ТЕЛЕГРАМ-СТРАНИЦЫ ---
+# --- ПРЯМОЙ ПАРСИНГ ТЕЛЕГРАМ-СТРАНИЦЫ НАПРЯМУЮ ---
 async def check_news(force=False):
-    logger.info(f"Запуск прямой проверки канала t.me/s/{SOURCE_CHANNEL}...")
-    url = f"https://t.me{SOURCE_CHANNEL}"
+    logger.info("Запуск прямой проверки канала t.me/s/br_dev...")
+    # Намертво зашиваем ссылку, чтобы она никогда не ломалась из-за переменных
+    url = "https://t.me"
     
     async with aiohttp.ClientSession() as session:
         try:
-            # Имитируем обычный браузер, чтобы Telegram отдал страницу
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
             async with session.get(url, headers=headers, timeout=15) as response:
                 if response.status != 200:
@@ -76,7 +75,7 @@ async def check_news(force=False):
                 text_match = re.search(r'<div class="tgme_widget_message_text[^>]*>(.*?)<\/div>', latest_post, re.DOTALL)
                 raw_text = text_match.group(1) if text_match else ""
                 
-                # Чистим текст от внутренних HTML-тегов Телеграма, переводя их в понятные боту
+                # Чистим текст от внутренних HTML-тегов Телеграма
                 clean_text = re.sub(r'<br\s*/?>', '\n', raw_text)
                 clean_text = re.sub(r'<[^>]+>', '', clean_text)
                 clean_text = unescape(clean_text).strip()
