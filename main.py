@@ -2,24 +2,22 @@ import asyncio
 import logging
 import os
 import re
-import xml.etree.ElementTree as ET
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
-from aiogram.types import Message, Update
+from aiogram.types import Update, Message
 from aiogram.filters import Command
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web, ClientSession
+from bs4 import BeautifulSoup
 
-# Ваше оригинальное логирование
+# Наше оригинальное логирование
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
-SOURCE_CHANNEL = "br_dev"
-# ИСПРАВЛЕНО: Чистый, полностью рабочий и стабильный адрес открытого RSS-моста
-RSS_URL = f"https://v2ex.com{SOURCE_CHANNEL}"
+# ИСПРАВЛЕНО: Стабильный адрес открытого канала для парсинга напрямую через HTML
+SOURCE_CHANNEL = "br_dev"  
 
 try:
     TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
@@ -28,61 +26,82 @@ except (ValueError, TypeError):
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-scheduler = AsyncIOScheduler()
 
 LAST_SENT_POST_LINK = None
 
-# Обработчик входящих вебхуков от Telegram
+# Обработчик входных вебхуков от Telegram и пингов от Render
 async def handle_webhook(request):
-    if request.method == "GET":
-        return web.Response(text="Got GameFloid активен и работает через Webhook.")
+    # ИСПРАВЛЕНО: Защита от HEAD и GET запросов Render, чтобы не было ошибки "Expecting value"
+    if request.method in ("GET", "HEAD"):
+        return web.Response(text="Бот активен и работает через Webhook.", status=200)
     
     try:
         json_data = await request.json()
         update = Update.model_validate(json_data, context={"bot": bot})
         await dp.feed_update(bot, update)
+        return web.Response(text="ok", status=200)
     except Exception as e:
         logger.error(f"Ошибка при обработке вебхука: {e}")
-    
-    return web.Response(text="ok")
+        return web.Response(text="error", status=400)
 
-# Функция чтения ленты канала
+# Функция чтения постов канала напрямую через BeautifulSoup (Взамен старого RSS)
 async def fetch_last_post():
-    try:
-        async with ClientSession() as session:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            async with session.get(RSS_URL, headers=headers, timeout=15) as response:
+    url = f"https://t.me{SOURCE_CHANNEL}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    async with ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, timeout=15) as response:
                 if response.status != 200:
-                    logger.error(f"Ошибка RSS: статус {response.status}")
+                    logger.error(f"Ошибка парсинга канала: статус {response.status}")
                     return None
-                
-                xml_data = await response.text()
-                root = ET.fromstring(xml_data)
-                
-                item = root.find(".//item")
-                if item is None:
-                    return None
-                
-                title = item.find("title").text if item.find("title") is not None else ""
-                link = item.find("link").text if item.find("link") is not None else ""
-                description = item.find("description").text if item.find("description") is not None else ""
-                
-                img_match = re.search(r'<img[^>]+src="([^"]+)"', description)
-                img_url = img_match.group(1) if img_match else None
-                
-                clean_text = re.sub(r'<[^>]+>', '', description).strip()
-                if not clean_text:
-                    clean_text = title
 
-                return {"text": clean_text, "image": img_url, "link": link}
-    except Exception as e:
-        logger.error(f"Не удалось распарсить RSS: {e}")
-        return None
+                html = await response.text()
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Находим все блоки сообщений
+                messages = soup.find_all('div', class_='tgme_widget_message_wrap')
+                if not messages:
+                    logger.warning("Посты в канале не найдены. Проверьте SOURCE_CHANNEL.")
+                    return None
+
+                # Берем самый последний (свежий) пост
+                last_message = messages[-1]
+
+                # Извлекаем текст поста
+                text_block = last_message.find('div', class_='tgme_widget_message_text')
+                clean_text = text_block.get_text(separator='\n') if text_block else ""
+                
+                if not clean_text:
+                    return None
+
+                # Извлекаем картинку (если она есть)
+                img_block = last_message.find('a', class_='tgme_widget_message_photo_styled')
+                img_url = None
+                if img_block and 'style' in img_block.attrs:
+                    style = img_block['style']
+                    if "url('" in style:
+                        img_url = style.split("url('")[1].split("')")[0]
+
+                # В качестве уникального линка используем первые 50 символов текста, чтобы определять новизну
+                post_link = str(hash(clean_text))
+
+                return {
+                    "text": clean_text,
+                    "image": img_url,
+                    "link": post_link
+                }
+
+        except Exception as e:
+            logger.error(f"Не удалось распарсить Telegram напрямую: {e}")
+            return None
 
 # Автопроверка (каждые 10 минут)
 async def check_news():
     global LAST_SENT_POST_LINK
-    logger.info("Автопроверка: сканируем стабильное RSS-зеркало...")
+    logger.info("Автопроверка: сканируем открытую веб-страницу канала...")
     
     post = await fetch_last_post()
     if not post:
@@ -113,12 +132,13 @@ async def check_news():
                 text=post["text"][:4096],
                 message_thread_id=thread_id
             )
+        
         LAST_SENT_POST_LINK = post["link"]
         logger.info("Успешно перенесен новый пост")
     except Exception as e:
         logger.error(f"Ошибка при автоматической отправке: {e}")
 
-# Ваш оригинальный хэндлер
+# Ваш оригинальный хэндлер команды /check
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     try:
@@ -130,7 +150,6 @@ async def cmd_check(message: Message):
             else:
                 await bot.send_message(chat_id=message.chat.id, text=post["text"][:4096])
         
-        # Ваши точные слова ответов
         await message.reply(
             "✅ Бот активен, ошибок авторизации нет.\n"
             "Автопроверка работает каждые 10 минут."
@@ -138,28 +157,40 @@ async def cmd_check(message: Message):
     except Exception as e:
         logger.error(f"Ошибка выполнения проверки: {e}")
 
-# Запуск вебхук-сервера (ИСПРАВЛЕНО: Полная рабочая функция)
-async def main():
+# Основная асинхронная функция запуска веб-сервера
+async def main_async():
     app = web.Application()
     app.router.add_post("/", handle_webhook)
     app.router.add_get("/", handle_webhook)
     
     runner = web.AppRunner(app)
     await runner.setup()
+    
     port = int(os.getenv("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info(f"Встроенный веб-сервер успешно запущен на порту {port}!")
-
+    
     # Привязка вебхука на внешний адрес Render
     webhook_url = os.getenv("RENDER_EXTERNAL_URL", "https://onrender.com")
     await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    logger.info(f"Вебхук успешно установлен на: {webhook_url}")
     
-    scheduler.add_job(check_news, "interval", minutes=10)
-    scheduler.start()
-    
-    await check_news()
-    await asyncio.Event().wait()
+    # Запускаем фоновую задачу периодической проверки (раз в 10 минут)
+    async def loop_scheduler():
+        while True:
+            await check_news()
+            await asyncio.sleep(600)
 
+    asyncio.create_task(loop_scheduler())
+    
+    # Удерживаем процесс активным непрерывно
+    while True:
+        await asyncio.sleep(3600)
+
+# ИСПРАВЛЕНО: Главная точка входа, которой не хватало для запуска скрипта на Render
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main_async())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот принудительно остановлен.")
