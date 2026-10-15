@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
-# ИСПРАВЛЕНО: Стабильный адрес открытого канала для парсинга напрямую через HTML
+# Юзернейм канала
 SOURCE_CHANNEL = "br_dev"  
 
 try:
@@ -31,7 +31,6 @@ LAST_SENT_POST_LINK = None
 
 # Обработчик входных вебхуков от Telegram и пингов от Render
 async def handle_webhook(request):
-    # ИСПРАВЛЕНО: Защита от HEAD и GET запросов Render, чтобы не было ошибки "Expecting value"
     if request.method in ("GET", "HEAD"):
         return web.Response(text="Бот активен и работает через Webhook.", status=200)
     
@@ -44,9 +43,10 @@ async def handle_webhook(request):
         logger.error(f"Ошибка при обработке вебхука: {e}")
         return web.Response(text="error", status=400)
 
-# Функция чтения постов канала напрямую через BeautifulSoup (Взамен старого RSS)
+# Функция чтения постов канала напрямую через BeautifulSoup
 async def fetch_last_post():
-    url = f"https://t.me{SOURCE_CHANNEL}"
+    # ИСПРАВЛЕНО: Используем telegram.me/s/ вместо t.me/s/ для обхода блокировки DNS на Render
+    url = f"https://telegram.me{SOURCE_CHANNEL}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -61,13 +61,11 @@ async def fetch_last_post():
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
                 
-                # Находим все блоки сообщений
                 messages = soup.find_all('div', class_='tgme_widget_message_wrap')
                 if not messages:
                     logger.warning("Посты в канале не найдены. Проверьте SOURCE_CHANNEL.")
                     return None
 
-                # Берем самый последний (свежий) пост
                 last_message = messages[-1]
 
                 # Извлекаем текст поста
@@ -83,9 +81,8 @@ async def fetch_last_post():
                 if img_block and 'style' in img_block.attrs:
                     style = img_block['style']
                     if "url('" in style:
-                        img_url = style.split("url('")[1].split("')")[0]
+                        img_url = style.split("url('").split("')")
 
-                # В качестве уникального линка используем первые 50 символов текста, чтобы определять новизну
                 post_link = str(hash(clean_text))
 
                 return {
@@ -138,7 +135,7 @@ async def check_news():
     except Exception as e:
         logger.error(f"Ошибка при автоматической отправке: {e}")
 
-# Ваш оригинальный хэндлер команды /check
+# Хэндлер команды /check
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     try:
@@ -171,12 +168,10 @@ async def main_async():
     await site.start()
     logger.info(f"Встроенный веб-сервер успешно запущен на порту {port}!")
     
-    # Привязка вебхука на внешний адрес Render
     webhook_url = os.getenv("RENDER_EXTERNAL_URL", "https://onrender.com")
     await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
     logger.info(f"Вебхук успешно установлен на: {webhook_url}")
     
-    # Запускаем фоновую задачу периодической проверки (раз в 10 минут)
     async def loop_scheduler():
         while True:
             await check_news()
@@ -184,11 +179,9 @@ async def main_async():
 
     asyncio.create_task(loop_scheduler())
     
-    # Удерживаем процесс активным непрерывно
     while True:
         await asyncio.sleep(3600)
 
-# ИСПРАВЛЕНО: Главная точка входа, которой не хватало для запуска скрипта на Render
 if __name__ == "__main__":
     try:
         asyncio.run(main_async())
