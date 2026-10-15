@@ -60,12 +60,8 @@ async def check_news(force_publish=False):
         logger.info("Парсер инициализирован. Ждем новые публикации.")
         return "initialized"
 
-    # Если вызвана команда /check, мы принудительно переносим самый свежий пост
     if force_publish:
         logger.info("Принудительный перенос последнего сообщения...")
-        # Так как API бота не дает узнать точный последний ID, мы перебираем последние ID с запасом.
-        # Для теста: пробуем скопировать сообщение, если мы знаем прошлый ID. 
-        # Ниже в хэндлере /check написан более надежный метод прямого поиска поста.
         return "forced"
 
     try:
@@ -90,16 +86,12 @@ async def check_news(force_publish=False):
         logger.error(f"Ошибка при получении обновлений: {e}")
         return "error"
 
-# ХЭНДЛЕР КОМАНДЫ /check (Перенесен выше main() чтобы aiogram его видел)
+# ХЭНДЛЕР КОМАНДЫ /check
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
+    global LAST_SENT_ID_RAM  # Теперь переменная видима внутри функции
     try:
         status_msg = await message.reply("⏳ Установлена связь с Telegram API. Получаю последний пост из канала...")
-        
-        # Если бот уже знает последний ID из памяти, берем его, иначе пробуем получить сообщение с ID=2 (или любым ранним)
-        # Для гарантированной отправки ПОСЛЕДНЕГО поста:
-        # Мы берем сохраненный ID, либо если его нет (после перезапуска Render), 
-        # запускаем цикл назад от сохраненного значения, чтобы найти крайний пост.
         
         base_id = LAST_SENT_ID_RAM if LAST_SENT_ID_RAM else 100000
         
@@ -113,7 +105,7 @@ async def cmd_check(message: Message):
                     message_id=check_id
                 )
                 # Если пост успешно отправился, запоминаем его ID для авто-проверки
-                if not LAST_SENT_ID_RAM:
+                if not LAST_SENT_ID_RAM or LAST_SENT_ID_RAM == 100000:
                     LAST_SENT_ID_RAM = check_id
                 success = True
                 break
@@ -142,7 +134,6 @@ async def main():
     await check_news(force_publish=False)
     
     logger.info("Бот успешно запущен в режиме Polling и готов принимать команды!")
-    # Чистый запуск polling без конфликтующих while True
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
