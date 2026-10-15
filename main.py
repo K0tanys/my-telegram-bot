@@ -10,10 +10,11 @@ from aiogram.types import URLInputFile
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
-# Логирование для Render
+# Настройка логирования для Render
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Загрузка конфигурации из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
@@ -25,9 +26,9 @@ scheduler = AsyncIOScheduler()
 
 LAST_SENT_ID_RAM = None
 
-# --- ВЕБ-СЕРВЕР ДЛЯ СТАБИЛЬНОСТИ НА RENDER ---
+# --- Фоновый веб-сервер для прохождения проверки портов Render ---
 async def handle_ping(request):
-    return web.Response(text="Бот GameFloid активен!")
+    return web.Response(text="Бот GameFloid активен и работает стабильно!")
 
 async def start_web_server():
     app = web.Application()
@@ -37,9 +38,9 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000)) 
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Встроенный сервер запущен на порту {port}. Проблема рестартов решена!")
+    logger.info(f"Встроенный сервер успешно запущен на порту {port}!")
 
-# --- РАБОТА С КАРТИНКАМИ И ТЕКСТОМ ---
+# --- Логика обработки картинок и очистки текста ---
 def extract_image_url(html_text):
     if not html_text:
         return None
@@ -53,22 +54,26 @@ def clean_html_tags(html_text):
     cleaned = re.sub(r'<br\s*/?>', '\n', cleaned)
     return cleaned.strip()
 
+# --- Главная функция проверки RSS-ленты ---
 async def check_news():
-    logger.info("Проверка RSS-ленты...")
-    # Здесь используется стабильное рабочее зеркало ://rssforever.com
-    rss_url = f"https://://rssforever.com/telegram/channel/{SOURCE_CHANNEL.lstrip('/')}"
+    logger.info("Запуск проверки RSS-ленты через стабильное зеркало...")
+    
+    # Идеально чистая сборка URL без лишних слешей
+    channel_name = SOURCE_CHANNEL.strip().lstrip("/")
+    rss_url = f"https://rssforever.com{channel_name}"
     
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(rss_url, timeout=15) as response:
                 if response.status != 200:
-                    logger.error(f"Ошибка RSSHub: {response.status}")
+                    logger.error(f"Зеркало RSSHub ответило статусом: {response.status}")
                     return
                 
                 xml_data = await response.text()
                 root = ET.fromstring(xml_data)
                 items = root.findall(".//item")
                 if not items:
+                    logger.info("Новых записей в ленте пока нет.")
                     return
                 
                 latest_item = items[0]
@@ -77,12 +82,12 @@ async def check_news():
                 
                 global LAST_SENT_ID_RAM
                 if LAST_SENT_ID_RAM is None:
-                    logger.info(f"Бот успешно запустился. Последний пост (ID: {latest_id}) сохранен.")
+                    logger.info(f"Первый запуск. Запомнили последний пост с ID: {latest_id}")
                     LAST_SENT_ID_RAM = str(latest_id)
                     return
                 
                 if LAST_SENT_ID_RAM != latest_id:
-                    logger.info("Найдена новая публикация!")
+                    logger.info("Обнаружена новая публикация в Black Russia!")
                     image_url = extract_image_url(raw_description)
                     clean_text = clean_html_tags(raw_description)
                     
@@ -107,9 +112,11 @@ async def check_news():
                             parse_mode=ParseMode.HTML
                         )
                     LAST_SENT_ID_RAM = str(latest_id)
-                    logger.info("Новость успешно отправлена в тему форума!")
+                    logger.info("Пост успешно переслан в топик форума.")
+                else:
+                    logger.info("Новых постов не выходило.")
         except Exception as e:
-            logger.error(f"Ошибка парсинга: {e}")
+            logger.error(f"Ошибка при разборе XML: {e}", exc_info=True)
 
 async def main():
     await start_web_server()
