@@ -6,7 +6,8 @@ import aiohttp
 import xml.etree.ElementTree as ET
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
-from aiogram.types import URLInputFile
+from aiogram.types import URLInputFile, Message
+from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -26,7 +27,7 @@ scheduler = AsyncIOScheduler()
 
 LAST_SENT_ID_RAM = None
 
-# --- Фоновый веб-сервер для прохождения проверки портов Render ---
+# --- Фоновый веб-сервер для Render ---
 async def handle_ping(request):
     return web.Response(text="Бот GameFloid активен и работает стабильно!")
 
@@ -55,10 +56,8 @@ def clean_html_tags(html_text):
     return cleaned.strip()
 
 # --- Главная функция проверки RSS-ленты ---
-async def check_news():
-    logger.info("Запуск проверки RSS-ленты через стабильное зеркало...")
-    
-    # Идеально чистая сборка URL без лишних слешей
+async def check_news(force=False):
+    logger.info("Запуск проверки RSS-ленты...")
     channel_name = SOURCE_CHANNEL.strip().lstrip("/")
     rss_url = f"https://rssforever.com{channel_name}"
     
@@ -67,27 +66,28 @@ async def check_news():
             async with session.get(rss_url, timeout=15) as response:
                 if response.status != 200:
                     logger.error(f"Зеркало RSSHub ответило статусом: {response.status}")
-                    return
+                    return "error"
                 
                 xml_data = await response.text()
                 root = ET.fromstring(xml_data)
                 items = root.findall(".//item")
                 if not items:
                     logger.info("Новых записей в ленте пока нет.")
-                    return
+                    return "empty"
                 
                 latest_item = items[0]
                 latest_id = latest_item.find("link").text if latest_item.find("link") is not None else latest_item.find("guid").text
                 raw_description = latest_item.find("description").text
                 
                 global LAST_SENT_ID_RAM
-                if LAST_SENT_ID_RAM is None:
+                
+                if LAST_SENT_ID_RAM is None and not force:
                     logger.info(f"Первый запуск. Запомнили последний пост с ID: {latest_id}")
                     LAST_SENT_ID_RAM = str(latest_id)
-                    return
+                    return "initialized"
                 
-                if LAST_SENT_ID_RAM != latest_id:
-                    logger.info("Обнаружена новая публикация в Black Russia!")
+                if LAST_SENT_ID_RAM != latest_id or force:
+                    logger.info("Отправка публикации в Telegram...")
                     image_url = extract_image_url(raw_description)
                     clean_text = clean_html_tags(raw_description)
                     
@@ -112,17 +112,48 @@ async def check_news():
                             parse_mode=ParseMode.HTML
                         )
                     LAST_SENT_ID_RAM = str(latest_id)
-                    logger.info("Пост успешно переслан в топик форума.")
+                    logger.info("Пост успешно переслан.")
+                    return "sent"
                 else:
                     logger.info("Новых постов не выходило.")
+                    return "no_new"
         except Exception as e:
-            logger.error(f"Ошибка при разборе XML: {e}", exc_info=True)
+            logger.error(f"Ошибка при проверке новостей: {e}", exc_info=True)
+            return "error"
+
+# --- ОБРАБОТЧИК КОМАНДЫ ДЛЯ АДМИНИСТРАТОРОВ ---
+@dp.message(Command("chek"))
+async def cmd_chek(message: Message):
+    try:
+        # Проверяем, является ли отправитель админом в нашей группе
+        member = await bot.get_chat_member(chat_id=TARGET_CHAT_ID, user_id=message.from_user.id)
+        
+        if member.status in ["administrator", "creator"]:
+            status_msg = await message.reply("⏳ Проверяю ленту новостей вручную...")
+            
+            # Запускаем принудительную выгрузку поста
+            result = await check_news(force=True)
+            
+            if result == "sent":
+                await status_msg.edit_text("✅ Проверка завершена. Последний пост отправлен в тред!")
+            elif result == "no_new" or result == "initialized":
+                await status_msg.edit_text("🔄 Новых постов в канале нет, но я проверил — связь с лентой отличная!")
+            else:
+                await status_msg.edit_text("❌ Ошибка при обращении к серверу новостей.")
+        else:
+            logger.warning(f"Пользователь {message.from_user.id} без прав админа пытался прописать /chek")
+    except Exception as e:
+        logger.error(f"Ошибка проверки прав админа: {e}")
 
 async def main():
     await start_web_server()
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
+    
+    # Холостой запуск при старте
     await check_news()
+    
+    # Включаем чтение команд из чата
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
