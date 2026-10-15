@@ -24,12 +24,12 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# Храним ID последнего отправленного поста в памяти
+# ID последнего отправленного поста в ОЗУ
 LAST_SENT_ID_RAM = None
 
 # --- Фоновый веб-сервер для Render ---
 async def handle_ping(request):
-    return web.Response(text="Бот GameFloid активен!")
+    return web.Response(text="Бот GameFloid активен и использует большие таймауты!")
 
 async def start_web_server():
     app = web.Application()
@@ -81,44 +81,44 @@ def clean_html_tags(html_text):
     cleaned = re.sub(r'<[^>]+>', '', cleaned)
     return unescape(cleaned).strip()
 
-# --- Главная функция проверки RSS-ленты с системой резервных зеркал ---
+# --- Проверка RSS-ленты с тремя зеркалами и долгим таймаутом ---
 async def check_news(force_publish=False):
-    logger.info("Запуск проверки RSS-ленты...")
+    logger.info("Запуск глубокой проверки RSS-ленты...")
     
-    # Список из двух стабильных зеркал для подстраховки
+    # 3 независимых публичных зеркала
     urls = [
         "https://slarker.me",
-        "https://rssforever.com"
+        "https://rssforever.com",
+        "https://rsshub.app"
     ]
     
     xml_data = None
-    # Перебираем зеркала, если какое-то из них тормозит или выдает ошибку
     for url in urls:
         try:
-            logger.info(f"Пробую подключиться к: {url}")
+            logger.info(f"Подключаюсь к: {url} (ожидание до 30 секунд)...")
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=6) as response:
+                # Увеличили таймаут до честных 30 секунд для полной прогрузки
+                async with session.get(url, timeout=30) as response:
                     if response.status == 200:
                         xml_data = await response.text()
-                        logger.info(f"Успешно получили данные от {url}")
+                        logger.info(f"Успешно скачали данные от {url}")
                         break
                     else:
-                        logger.warning(f"Зеркало {url} ответило статусом {response.status}")
+                        logger.warning(f"Сервер {url} ответил статусом {response.status}")
         except Exception as e:
-            logger.warning(f"Не удалось подключиться к {url}: {e}")
+            logger.warning(f"Сервер {url} не ответил за отведенное время: {e}")
             continue
             
     if not xml_data:
-        logger.error("Все доступные зеркала сейчас перегружены таймаутами.")
+        logger.error("Ни одно из 3 зеркал не успело ответить.")
         return "error"
         
     try:
         items = parse_rss_items(xml_data)
         if not items:
-            logger.info("Постов в ленте не обнаружено.")
+            logger.info("Постов в ленте не найдено.")
             return "empty"
         
-        # Брем самый свежий пост
         latest_item = items[0]
         latest_id = latest_item["id"]
         raw_description = latest_item["description"]
@@ -126,7 +126,7 @@ async def check_news(force_publish=False):
         global LAST_SENT_ID_RAM
         
         if LAST_SENT_ID_RAM is None and not force_publish:
-            logger.info(f"Первый запуск бота. Запомнили текущий пост (ID: {latest_id})")
+            logger.info(f"Первый старт бота. Зафиксирован текущий пост (ID: {latest_id})")
             LAST_SENT_ID_RAM = str(latest_id)
             return "initialized"
         
@@ -160,11 +160,11 @@ async def check_news(force_publish=False):
             logger.info("Пост успешно отправлен.")
             return "sent"
         else:
-            logger.info("Новых постов нет.")
+            logger.info("Новых постов в канале нет.")
             return "no_new"
             
     except Exception as e:
-        logger.error(f"Ошибка при обработке XML: {e}", exc_info=True)
+        logger.error(f"Ошибка обработки XML-структуры: {e}", exc_info=True)
         return "error"
 
 # --- ОБРАБОТЧИК КОМАНДЫ /chek ДЛЯ АДМИНИСТРАТОРОВ ---
@@ -174,14 +174,14 @@ async def cmd_chek(message: Message):
         member = await bot.get_chat_member(chat_id=TARGET_CHAT_ID, user_id=message.from_user.id)
         
         if member.status in ["administrator", "creator"]:
-            status_msg = await message.reply("⏳ Связываюсь с серверами. Забираю последний пост из канала...")
+            status_msg = await message.reply("⏳ Связываюсь с серверами новостей (это может занять до 30 сек). Забираю пост...")
             
             result = await check_news(force_publish=True)
             
             if result == "sent":
                 await status_msg.edit_text("✅ Последний актуальный пост из канала успешно доставлен!")
             else:
-                await status_msg.edit_text("❌ Все серверы-зеркала сейчас заняты. Пожалуйста, подождите минуту и повторите команду.")
+                await status_msg.edit_text("❌ Все серверы-зеркала сейчас перегружены или не успели ответить. Попробуйте еще раз.")
         else:
             logger.warning(f"Пользователь {message.from_user.id} без прав админа ввел /chek")
     except Exception as e:
@@ -192,7 +192,7 @@ async def main():
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
     
-    # Холостой запуск при старте для фиксации последнего поста
+    # Холостой запуск для фиксации при старте
     await check_news(force_publish=False)
     
     await dp.start_polling(bot)
