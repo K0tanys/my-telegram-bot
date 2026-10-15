@@ -4,6 +4,7 @@ import os
 import re
 import aiohttp
 import xml.etree.ElementTree as ET
+from html import unescape
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import URLInputFile, Message
@@ -15,7 +16,7 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Загрузка конфигурации строго из ваших Environment Variables на Render
+# Загрузка конфигурации из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
@@ -24,12 +25,12 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# Храним ID последнего отправленного поста в оперативной памяти
+# ID последнего отправленного поста в ОЗУ
 LAST_SENT_ID_RAM = None
 
-# --- Фоновый веб-сервер для прохождения проверок портов Render ---
+# --- Фоновый веб-сервер для Render ---
 async def handle_ping(request):
-    return web.Response(text="Бот GameFloid активен и работает через стабильный RSS-шлюз!")
+    return web.Response(text="Бот GameFloid активен и использует гибридный парсинг!")
 
 async def start_web_server():
     app = web.Application()
@@ -41,7 +42,30 @@ async def start_web_server():
     await site.start()
     logger.info(f"Встроенный веб-сервер успешно запущен на порту {port}!")
 
-# --- Логика обработки картинок и очистки HTML ---
+# --- Способ №1: Резервный текстовый парсер через регулярные выражения ---
+def parse_rss_with_regex(xml_data):
+    """Безопасно вытаскивает посты, если XML-структура сломана спецсимволами"""
+    items = re.findall(r'<item>(.*?)</item>', xml_data, re.DOTALL)
+    if not items:
+        return None
+        
+    latest_item = items[0]
+    link_match = re.search(r'<link>(.*?)</link>', latest_item, re.DOTALL)
+    if not link_match:
+        link_match = re.search(r'<guid[^>]*>(.*?)</guid>', latest_item, re.DOTALL)
+    
+    desc_match = re.search(r'<description>(.*?)</description>', latest_item, re.DOTALL)
+    
+    if link_match and desc_match:
+        post_id = link_match.group(1).strip()
+        post_id = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', post_id, re.DOTALL)
+        
+        raw_desc = desc_match.group(1)
+        raw_desc = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', raw_desc, re.DOTALL)
+        
+        return post_id, raw_desc
+    return None
+
 def extract_image_url(html_text):
     if not html_text:
         return None
@@ -54,17 +78,14 @@ def clean_html_tags(html_text):
     cleaned = re.sub(r'<img[^>]+>', '', html_text)
     cleaned = re.sub(r'<br\s*/?>', '\n', cleaned)
     cleaned = re.sub(r'<[^>]+>', '', cleaned)
-    return cleaned.strip()
+    return unescape(cleaned).strip()
 
-# --- Автоматическая проверка стабильной ленты ---
+# --- Главная функция проверки RSS-ленты (Гибридный режим) ---
 async def check_news(force_publish=False):
-    logger.info("Проверка обновлений в официальном канале...")
-    
-    # Используем выделенный глобальный шлюз RSS.app для канала br_dev
+    logger.info("Проверка обновлений через гибридный шлюз...")
     rss_url = "https://rss.app"
     
-    # Настраиваем надежный таймаут ожидания ответа
-    custom_timeout = aiohttp.ClientTimeout(total=25)
+    custom_timeout = aiohttp.ClientTimeout(total=30)
     
     async with aiohttp.ClientSession(timeout=custom_timeout) as session:
         try:
@@ -74,26 +95,39 @@ async def check_news(force_publish=False):
                     return "error"
                 
                 xml_data = await response.text()
-                root = ET.fromstring(xml_data)
-                items = root.findall(".//item")
-                if not items:
-                    logger.info("Лента новостей пуста.")
-                    return "empty"
                 
-                # Забираем самую свежую (верхнюю) запись
-                latest_item = items[0]
-                latest_id = latest_item.find("link").text if latest_item.find("link") is not None else latest_item.find("guid").text
-                raw_description = latest_item.find("description").text
+                latest_id = None
+                raw_description = None
+                
+                # --- ПОПЫТКА №1: Стандартный XML-парсер (ElementTree) ---
+                try:
+                    root = ET.fromstring(xml_data)
+                    items = root.findall(".//item")
+                    if items:
+                        latest_item = items[0]
+                        latest_id = latest_item.find("link").text if latest_item.find("link") is not None else latest_item.find("guid").text
+                        raw_description = latest_item.find("description").text
+                        logger.info("Лента успешно обработана стандартным XML-парсером.")
+                except ET.ParseError:
+                    # --- ПОПЫТКА №2: Переключение на Регулярные выражения при сбое символов ---
+                    logger.warning("XML содержит битые токены! Переключаюсь на резервный текстовый парсер...")
+                    regex_result = parse_rss_with_regex(xml_data)
+                    if regex_result:
+                        latest_id, raw_description = regex_result
+                        logger.info("Лента успешно обработана резервным текстовым парсером.")
+                
+                # Если ни один из способов не смог прочитать данные
+                if not latest_id or not raw_description:
+                    logger.error("Не удалось разобрать структуру данных ни одним из способов.")
+                    return "error"
                 
                 global LAST_SENT_ID_RAM
                 
-                # При самом первом старте просто запоминаем пост
                 if LAST_SENT_ID_RAM is None and not force_publish:
                     logger.info(f"Успешный старт. Текущий пост сохранен в памяти (ID: {latest_id})")
                     LAST_SENT_ID_RAM = str(latest_id)
                     return "initialized"
                 
-                # Пересылаем, если пост новый ИЛИ если админ нажал /chek
                 if LAST_SENT_ID_RAM != latest_id or force_publish:
                     logger.info(f"Копирую актуальный пост в тему форума {TOPIC_ID}...")
                     image_url = extract_image_url(raw_description)
@@ -121,14 +155,14 @@ async def check_news(force_publish=False):
                         )
                     
                     LAST_SENT_ID_RAM = str(latest_id)
-                    logger.info("Пост успешно переслан автоматически.")
+                    logger.info("Пост успешно переслан.")
                     return "sent"
                 else:
                     logger.info("Новых постов не обнаружено.")
                     return "no_new"
                     
         except Exception as e:
-            logger.error(f"Ошибка в модуле check_news: {e}", exc_info=True)
+            logger.error(f"Критическая ошибка в check_news: {e}", exc_info=True)
             return "error"
 
 # --- ОБРАБОТЧИК КОМАНДЫ /chek ДЛЯ АДМИНИСТРАТОРОВ ---
@@ -137,10 +171,10 @@ async def cmd_chek(message: Message):
     try:
         member = await bot.get_chat_member(chat_id=TARGET_CHAT_ID, user_id=message.from_user.id)
         if member.status in ["administrator", "creator"]:
-            status_msg = await message.reply("⏳ Связываюсь с глобальным шлюзом. Проверяю ленту новостей...")
+            status_msg = await message.reply("⏳ Связываюсь с глобальным шлюзом. Проверяю ленту новостей в гибридном режиме...")
             result = await check_news(force_publish=True)
             if result == "sent":
-                await status_msg.edit_text("✅ Проверка завершена. Последний пост успешно скопирован в вашу тему!")
+                await status_msg.edit_text("✅ Гибридная проверка завершена! Последний актуальный пост успешно скопирован.")
             else:
                 await status_msg.edit_text("❌ Ошибка шлюза. Но автоматический таймер продолжит работу.")
         else:
@@ -150,13 +184,10 @@ async def cmd_chek(message: Message):
 
 async def main():
     await start_web_server()
-    # Таймер автоматической проверки (каждые 10 минут)
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
     
-    # Холостой запуск для фиксации при старте приложения
     await check_news(force_publish=False)
-    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
