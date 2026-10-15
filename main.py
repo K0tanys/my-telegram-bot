@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import aiohttp
-import xml.etree.ElementTree as ET
+from html import unescape
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import URLInputFile, Message
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Загрузка конфигурации из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
-SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
+SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "br_dev").strip().lstrip("@")
 TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
 
 bot = Bot(token=BOT_TOKEN)
@@ -29,7 +29,7 @@ LAST_SENT_ID_RAM = None
 
 # --- Фоновый веб-сервер для Render ---
 async def handle_ping(request):
-    return web.Response(text="Бот GameFloid активен и работает стабильно!")
+    return web.Response(text="Бот GameFloid активен и работает стабильно через прямой парсинг!")
 
 async def start_web_server():
     app = web.Application()
@@ -41,55 +41,61 @@ async def start_web_server():
     await site.start()
     logger.info(f"Встроенный сервер успешно запущен на порту {port}!")
 
-# --- Логика обработки картинок и очистки текста ---
-def extract_image_url(html_text):
-    if not html_text:
-        return None
-    match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_text)
-    return match.group(1) if match else None
-
-def clean_html_tags(html_text):
-    if not html_text:
-        return ""
-    cleaned = re.sub(r'<img[^>]+>', '', html_text)
-    cleaned = re.sub(r'<br\s*/?>', '\n', cleaned)
-    return cleaned.strip()
-
-# --- Главная функция проверки RSS-ленты ---
+# --- ПРЯМОЙ ПАРСИНГ ТЕЛЕГРАМ-СТРАНИЦЫ ---
 async def check_news(force=False):
-    logger.info("Запуск проверки RSS-ленты...")
-    channel_name = SOURCE_CHANNEL.strip().lstrip("/")
-    rss_url = f"https://rssforever.com{channel_name}"
+    logger.info(f"Запуск прямой проверки канала t.me/s/{SOURCE_CHANNEL}...")
+    url = f"https://t.me{SOURCE_CHANNEL}"
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(rss_url, timeout=15) as response:
+            # Имитируем обычный браузер, чтобы Telegram отдал страницу
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.get(url, headers=headers, timeout=15) as response:
                 if response.status != 200:
-                    logger.error(f"Зеркало RSSHub ответило статусом: {response.status}")
+                    logger.error(f"Не удалось открыть страницу Telegram: статус {response.status}")
                     return "error"
                 
-                xml_data = await response.text()
-                root = ET.fromstring(xml_data)
-                items = root.findall(".//item")
-                if not items:
-                    logger.info("Новых записей в ленте пока нет.")
+                html_text = await response.text()
+                
+                # Находим все блоки постов на веб-странице
+                posts = re.findall(r'<div class="tgme_widget_message_widget[^">]*".*?<\/div>\s*<\/div>\s*<\/div>', html_text, re.DOTALL)
+                if not posts:
+                    logger.info("На странице канала не найдено постов.")
                     return "empty"
                 
-                latest_item = items[0]
-                latest_id = latest_item.find("link").text if latest_item.find("link") is not None else latest_item.find("guid").text
-                raw_description = latest_item.find("description").text
+                # Берем самый последний (свежий) пост со страницы
+                latest_post = posts[-1]
+                
+                # Извлекаем уникальный ID поста в Telegram (номер сообщения)
+                id_match = re.search(r'data-post="[^"\/]+\/(\d+)"', latest_post)
+                if not id_match:
+                    return "error"
+                latest_id = id_match.group(1)
+                
+                # Извлекаем текст поста
+                text_match = re.search(r'<div class="tgme_widget_message_text[^>]*>(.*?)<\/div>', latest_post, re.DOTALL)
+                raw_text = text_match.group(1) if text_match else ""
+                
+                # Чистим текст от внутренних HTML-тегов Телеграма, переводя их в понятные боту
+                clean_text = re.sub(r'<br\s*/?>', '\n', raw_text)
+                clean_text = re.sub(r'<[^>]+>', '', clean_text)
+                clean_text = unescape(clean_text).strip()
+                
+                # Извлекаем картинку поста (если она есть)
+                image_url = None
+                img_match = re.search(r'background-image:url\(\'([^\']+)\'\)', latest_post)
+                if img_match:
+                    image_url = img_match.group(1)
                 
                 global LAST_SENT_ID_RAM
                 
                 if LAST_SENT_ID_RAM is None and not force:
-                    logger.info(f"Первый запуск. Запомнили последний пост с ID: {latest_id}")
+                    logger.info(f"Первый запуск. Запомнили пост с ID: {latest_id}")
                     LAST_SENT_ID_RAM = str(latest_id)
                     return "initialized"
                 
                 if LAST_SENT_ID_RAM != latest_id or force:
-                    logger.info("Отправка публикации в Telegram...")
-                    image_url = extract_image_url(raw_description)
-                    clean_text = clean_html_tags(raw_description)
+                    logger.info(f"Отправка публикации ID {latest_id} в Telegram...")
                     
                     if len(clean_text) > 1024:
                         clean_text = clean_text[:1020] + "..."
@@ -112,36 +118,35 @@ async def check_news(force=False):
                             parse_mode=ParseMode.HTML
                         )
                     LAST_SENT_ID_RAM = str(latest_id)
-                    logger.info("Пост успешно переслан.")
+                    logger.info("Пост успешно доставлен напрямую!")
                     return "sent"
                 else:
-                    logger.info("Новых постов не выходило.")
+                    logger.info("Новых постов не обнаружено.")
                     return "no_new"
+                    
         except Exception as e:
-            logger.error(f"Ошибка при проверке новостей: {e}", exc_info=True)
+            logger.error(f"Ошибка прямого парсинга: {e}", exc_info=True)
             return "error"
 
 # --- ОБРАБОТЧИК КОМАНДЫ ДЛЯ АДМИНИСТРАТОРОВ ---
 @dp.message(Command("chek"))
 async def cmd_chek(message: Message):
     try:
-        # Проверяем, является ли отправитель админом в нашей группе
         member = await bot.get_chat_member(chat_id=TARGET_CHAT_ID, user_id=message.from_user.id)
         
         if member.status in ["administrator", "creator"]:
-            status_msg = await message.reply("⏳ Проверяю ленту новостей вручную...")
+            status_msg = await message.reply("⏳ Подключаюсь напрямую к серверам Telegram и проверяю канал...")
             
-            # Запускаем принудительную выгрузку поста
             result = await check_news(force=True)
             
             if result == "sent":
-                await status_msg.edit_text("✅ Проверка завершена. Последний пост отправлен в тред!")
+                await status_msg.edit_text("✅ Проверка завершена. Пост успешно отправлен!")
             elif result == "no_new" or result == "initialized":
-                await status_msg.edit_text("🔄 Новых постов в канале нет, но я проверил — связь с лентой отличная!")
+                await status_msg.edit_text("🔄 Новых постов нет, но прямая связь с каналом работает идеально, без ошибок!")
             else:
-                await status_msg.edit_text("❌ Ошибка при обращении к серверу новостей.")
+                await status_msg.edit_text("❌ Не удалось связаться с веб-страницей Telegram. Попробуйте еще раз.")
         else:
-            logger.warning(f"Пользователь {message.from_user.id} без прав админа пытался прописать /chek")
+            logger.warning(f"Пользователь {message.from_user.id} без прав админа ввел /chek")
     except Exception as e:
         logger.error(f"Ошибка проверки прав админа: {e}")
 
@@ -150,10 +155,7 @@ async def main():
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
     
-    # Холостой запуск при старте
     await check_news()
-    
-    # Включаем чтение команд из чата
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
