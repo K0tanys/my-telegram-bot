@@ -18,14 +18,13 @@ logger = logging.getLogger(__name__)
 # Загрузка конфигурации из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
-SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "br_dev").strip().lstrip("@")
 TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# Храним ID последних отправленных постов в памяти (чтобы избежать дубликатов)
+# Храним ID последних отправленных постов в памяти
 SENT_IDS_POOL = set()
 
 # --- Фоновый веб-сервер для Render ---
@@ -58,8 +57,11 @@ def clean_html_tags(html_text):
 
 # --- Функция проверки RSS-ленты (Берет 3 последних поста) ---
 async def check_news(force_publish=False):
-    logger.info("Запуск проверки RSS-ленты (сканируем последние посты)...")
-    rss_url = f"https://slarker.me{SOURCE_CHANNEL}"
+    logger.info("Запуск проверки RSS-ленты...")
+    
+    # Намертво зашиваем ссылку, чтобы никакие переменные её не ломали
+    rss_url = "https://slarker.me"
+    logger.info(f"Подключаюсь к: {rss_url}")
     
     async with aiohttp.ClientSession() as session:
         try:
@@ -75,11 +77,8 @@ async def check_news(force_publish=False):
                     logger.info("Лента новостей пуста.")
                     return "empty"
                 
-                # Берем до 3 самых свежих постов из начала ленты
+                # Берем до 3 самых свежих постов
                 target_items = items[:3]
-                
-                # Чтобы посты публиковались в правильном хронологическом порядке (от старого к новому),
-                # разворачиваем список задом наперед
                 target_items.reverse()
                 
                 posts_sent_count = 0
@@ -91,7 +90,6 @@ async def check_news(force_publish=False):
                     post_id = item.find("link").text if item.find("link") is not None else item.find("guid").text
                     raw_description = item.find("description").text
                     
-                    # Если этот пост мы уже отправляли И это не принудительный ручной тест команды /chek
                     if post_id in SENT_IDS_POOL and not force_publish:
                         continue
                     
@@ -102,7 +100,6 @@ async def check_news(force_publish=False):
                     if len(clean_text) > 1024:
                         clean_text = clean_text[:1020] + "..."
                     
-                    # Отправка медиа или текста в Telegram
                     if image_url:
                         await bot.send_photo(
                             chat_id=TARGET_CHAT_ID,
@@ -119,17 +116,15 @@ async def check_news(force_publish=False):
                             parse_mode=ParseMode.HTML
                         )
                     
-                    # Запоминаем ID, чтобы не слать повторно по таймеру
                     SENT_IDS_POOL.add(post_id)
                     posts_sent_count += 1
-                    # Небольшая пауза между отправками, чтобы Telegram не ругался на спам
                     await asyncio.sleep(2)
                 
                 if posts_sent_count > 0:
                     logger.info(f"Успешно опубликовано постов: {posts_sent_count}")
                     return "sent"
                 else:
-                    logger.info("Новых публикаций с момента прошлой проверки не появилось.")
+                    logger.info("Новых публикаций не появилось.")
                     return "no_new"
                     
         except Exception as e:
@@ -145,11 +140,10 @@ async def cmd_chek(message: Message):
         if member.status in ["administrator", "creator"]:
             status_msg = await message.reply("⏳ Запускаю сканирование ленты. Собираю 3 последних поста...")
             
-            # Передаем True, чтобы бот принудительно выгрузил 3 верхних поста для теста
             result = await check_news(force_publish=True)
             
             if result == "sent":
-                await status_msg.edit_text("✅ Проверка завершена! 3 последних поста успешно отправлены в вашу тему форума.")
+                await status_msg.edit_text("✅ Проверка завершена! 3 последних поста успешно отправлены в тему форума.")
             elif result == "empty" or result == "no_new":
                 await status_msg.edit_text("🔄 Связь с сервером есть, но постов в ленте не найдено.")
             else:
@@ -161,12 +155,10 @@ async def cmd_chek(message: Message):
 
 async def main():
     await start_web_server()
-    
-    # Автоматическая проверка каждые 10 минут
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
     
-    # При самом первом "холодном" старте в облаке бот сразу соберет текущие 3 поста и запомнит их
+    # При старте просто заполняем пул, чтобы не спамить автоматически
     await check_news(force_publish=False)
     
     await dp.start_polling(bot)
