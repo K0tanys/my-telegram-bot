@@ -4,7 +4,6 @@ import os
 import re
 import aiohttp
 from bs4 import BeautifulSoup
-import html
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message
@@ -23,7 +22,7 @@ TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 # Безопасное приведение TOPIC_ID к числу
 try:
     TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
-except ValueError:
+except (ValueError, TypeError):
     TOPIC_ID = 0
 
 bot = Bot(token=BOT_TOKEN)
@@ -33,7 +32,7 @@ scheduler = AsyncIOScheduler()
 # ID последнего отправленного поста в ОЗУ
 LAST_SENT_ID_RAM = None
 
-# Фоновый веб-сервер для Render
+# Фоновый веб-сервер для удовлетворения проверок Render
 async def handle_ping(request):
     return web.Response(text="Бот GameFloid активен и работает через собственный пинг.")
 
@@ -51,7 +50,7 @@ async def start_web_server():
 async def check_news(force_publish=False):
     global LAST_SENT_ID_RAM
     logger.info("Собственный парсер BeautifulSoup запущен...")
-    url = "https://t.me"  # Пример ссылки (можете изменить на нужный канал)
+    url = "https://t.me"
     
     custom_timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=custom_timeout) as session:
@@ -63,7 +62,9 @@ async def check_news(force_publish=False):
                     return "error"
                 
                 html_data = await response.text()
-                soup = BeautifulSoup(html_data, "lxml") # Используем быстрый lxml
+                
+                # ИСПРАВЛЕНО: Используем стандартный html.parser, встроенный в Python (не требует lxml)
+                soup = BeautifulSoup(html_data, "html.parser")
                 
                 posts = soup.find_all("div", class_="tgme_widget_message")
                 if not posts:
@@ -107,7 +108,7 @@ async def check_news(force_publish=False):
                     
                     thread_id = TOPIC_ID if TOPIC_ID != 0 else None
                     
-                    # ИСПРАВЛЕНО: aiogram 3.x принимает ссылку на фото строкой напрямую
+                    # ИСПРАВЛЕНО: aiogram 3.x принимает прямую ссылку строкой
                     if image_url:
                         await bot.send_photo(
                             chat_id=TARGET_CHAT_ID,
@@ -135,7 +136,7 @@ async def check_news(force_publish=False):
             logger.error(f"Ошибка в модуле BeautifulSoup: {e}", exc_info=True)
             return "error"
 
-# ОБРАБОТЧИК КОМАНДЫ /check ДЛЯ АДМИНИСТРАТОРОВ (Исправлена опечатка)
+# ОБРАБОТЧИК КОМАНДЫ /check ДЛЯ АДМИНИСТРАТОРОВ (Опечатка исправлена)
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     try:
@@ -156,13 +157,20 @@ async def cmd_check(message: Message):
         logger.error(f"Ошибка проверки прав админа: {e}")
 
 async def main():
+    # Запуск сервера контроля доступности
     await start_web_server()
+    
+    # Сброс возможных старых вебхуков, чтобы не вызывать конфликты сессий
+    await bot.delete_webhook(drop_pending_updates=True)
     
     # Автоматическая проверка каждые 10 минут
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
     
+    # Первичный запуск парсера
     await check_news(force_publish=False)
+    
+    # Старт получения обновлений
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
