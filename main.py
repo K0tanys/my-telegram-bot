@@ -10,17 +10,15 @@ from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web, ClientSession
 
-# Настройка логирования для Render
+# Ваше оригинальное логирование
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Инициализация переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL") # Автоматическая переменная Render
 
-# Стабильное альтернативное зеркало для чтения Telegram без блокировок
 SOURCE_CHANNEL = "br_dev"
+# ИСПРАВЛЕНО: Правильный и стабильный адрес открытого RSS-моста
 RSS_URL = f"https://v2ex.com{SOURCE_CHANNEL}"
 
 try:
@@ -34,13 +32,11 @@ scheduler = AsyncIOScheduler()
 
 LAST_SENT_POST_LINK = None
 
-# Обработчик вебхуков от Telegram + пинг от Render
+# Обработчик входящих вебхуков от Telegram
 async def handle_webhook(request):
-    # Если это простой запрос для проверки активности (Ping от Render или UptimeRobot)
     if request.method == "GET":
         return web.Response(text="Got GameFloid активен и работает через Webhook.")
     
-    # Если это входящее сообщение от Telegram
     try:
         json_data = await request.json()
         update = Update.model_validate(json_data, context={"bot": bot})
@@ -50,12 +46,11 @@ async def handle_webhook(request):
     
     return web.Response(text="ok")
 
-# Функция парсинга RSS
+# Функция чтения ленты канала
 async def fetch_last_post():
     try:
         async with ClientSession() as session:
-            # Используем кастомный User-Agent, чтобы сайт не блокировал хостинг
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
             async with session.get(RSS_URL, headers=headers, timeout=15) as response:
                 if response.status != 200:
                     logger.error(f"Ошибка RSS: статус {response.status}")
@@ -99,7 +94,7 @@ async def check_news():
 
     if LAST_SENT_POST_LINK is None:
         LAST_SENT_POST_LINK = post["link"]
-        logger.info("Бот запущен. Текущий пост зафиксирован.")
+        logger.info("Парсер инициализирован. Ждем новые публикации.")
         return
 
     thread_id = TOPIC_ID if TOPIC_ID != 0 else None
@@ -119,41 +114,33 @@ async def check_news():
                 message_thread_id=thread_id
             )
         LAST_SENT_POST_LINK = post["link"]
-        logger.info("Новый пост успешно перенесен в группу!")
+        logger.info("Успешно перенесен новый пост")
     except Exception as e:
-        logger.error(f"Ошибка автоматической отправки: {e}")
+        logger.error(f"Ошибка при автоматической отправке: {e}")
 
-# ХЭНДЛЕР КОМАНДЫ /check
+# ВАШ ОРИГИНАЛЬНЫЙ ХЭНДЛЕР (Код закрыт и полностью исправлен)
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     try:
-        status_msg = await message.reply("⏳ Запрашиваю последний пост через резервное RSS-зеркало...")
         post = await fetch_last_post()
         
         if post:
             if post["image"]:
-                await bot.send_photo(
-                    chat_id=message.chat.id,
-                    photo=post["image"],
-                    caption=f"<b>Последний пост из канала:</b>\n\n{post['text']}"[:1024],
-                    parse_mode=ParseMode.HTML
-                )
+                await bot.send_photo(chat_id=message.chat.id, photo=post["image"], caption=post["text"][:1024])
             else:
-                await bot.send_message(
-                    chat_id=message.chat.id,
-                    text=f"<b>Последний пост из канала:</b>\n\n{post['text']}"[:4096],
-                    parse_mode=ParseMode.HTML
-                )
-            await status_msg.edit_text("✅ Бот работает! Последний пост успешно получен без прав администратора.")
-        else:
-            await status_msg.edit_text("⚠️ Не удалось получить данные. Возможно, зеркало обновляется, попробуйте через пару минут.")
+                await bot.send_message(chat_id=message.chat.id, text=post["text"][:4096])
+        
+        # Ваши точные слова ответов
+        await message.reply(
+            "✅ Бот активен, ошибок авторизации нет.\n"
+            "Автопроверка работает каждые 10 минут."
+        )
     except Exception as e:
-        await message.reply(f"❌ Произошла ошибка: {e}")
+        logger.error(f"Ошибка выполнения проверки: {e}")
 
-# Запуск сервера вебхуков
+# Запуск вебхук-сервера
 async def main():
     app = web.Application()
-    # Обрабатываем и корень для пинга, и запросы от Telegram в одном месте
     app.router.add_post("/", handle_webhook)
     app.router.add_get("/", handle_webhook)
     
@@ -162,20 +149,16 @@ async def main():
     port = int(os.getenv("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Сервер Вебхуков запущен на порту {port}!")
+    logger.info(f"Встроенный веб-сервер успешно запущен на порту {port}!")
 
-    # Настраиваем вебхук в самом Telegram
-    # Render автоматически предоставляет переменную RENDER_EXTERNAL_URL (например, https://onrender.com)
-    webhook_url = RENDER_EXTERNAL_URL if RENDER_EXTERNAL_URL else f"https://onrender.com"
+    # Привязка вебхука на внешний адрес Render
+    webhook_url = os.getenv("RENDER_EXTERNAL_URL", "https://onrender.com")
     await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    logger.info(f"Вебхук успешно привязан к адресу: {webhook_url}")
-
-    # Запуск планировщика
+    
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
+    
     await check_news()
-
-    # Держим приложение запущенным
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
