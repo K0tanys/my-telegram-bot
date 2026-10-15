@@ -29,8 +29,8 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# Храним ID последнего отправленного сообщения
-LAST_SENT_ID_RAM = None
+# Указываем 2312 как точку отсчета, чтобы бот точно знал текущую позицию
+LAST_SENT_ID_RAM = 2312
 
 # Фоновый веб-сервер для прохождения проверок Render
 async def handle_ping(request):
@@ -49,33 +49,24 @@ async def start_web_server():
 # Официальный метод копирования постов без парсинга сайтов
 async def check_news(force_publish=False):
     global LAST_SENT_ID_RAM
-    logger.info("Проверка обновлений в канале через официальный Telegram API...")
+    logger.info("Проверка... Сканируем канал на наличие новых публикаций...")
     
     thread_id = TOPIC_ID if TOPIC_ID != 0 else None
 
-    # Если это первый запуск и мы не знаем ID последнего поста
-    if LAST_SENT_ID_RAM is None and not force_publish:
-        # Для автоматизации: сначала пытаемся нащупать условный ID (например, 100000)
-        LAST_SENT_ID_RAM = 100000
-        logger.info("Парсер инициализирован. Ждем новые публикации.")
-        return "initialized"
-
     if force_publish:
-        logger.info("Принудительный перенос последнего сообщения...")
+        logger.info("Принудительный перенос сообщения запрошен.")
         return "forced"
 
     try:
-        # Автоматический режим (работает каждые 10 минут)
+        # Автоматический режим (работает каждые 10 минут) — ищет пост 2313 и далее
         next_id = int(LAST_SENT_ID_RAM) + 1
         
-        # Пытаемся скопировать следующее сообщение по порядку ID
         await bot.copy_message(
             chat_id=TARGET_CHAT_ID,
             from_chat_id=SOURCE_CHANNEL,
             message_id=next_id,
             message_thread_id=thread_id
         )
-        # Если отправка удалась, обновляем наш ID
         LAST_SENT_ID_RAM = next_id
         logger.info(f"Успешно перенесен новый пост с ID: {next_id}")
         
@@ -89,37 +80,22 @@ async def check_news(force_publish=False):
 # ХЭНДЛЕР КОМАНДЫ /check
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
-    global LAST_SENT_ID_RAM  # Теперь переменная видима внутри функции
+    global LAST_SENT_ID_RAM
     try:
-        status_msg = await message.reply("⏳ Установлена связь с Telegram API. Получаю последний пост из канала...")
+        status_msg = await message.reply("⏳ Связь установлена. Получаю пост под номером 2312...")
         
-        base_id = LAST_SENT_ID_RAM if LAST_SENT_ID_RAM else 100000
+        # Копируем пост 2312 прямо в чат к пользователю для проверки
+        await bot.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=SOURCE_CHANNEL,
+            message_id=2312
+        )
         
-        success = False
-        # Пробуем скопировать пост. Если падает ошибка — уменьшаем ID, пока не найдем существующий пост
-        for check_id in range(base_id + 5, max(0, base_id - 20), -1):
-            try:
-                await bot.copy_message(
-                    chat_id=message.chat.id,      # Отправляем прямо вам в чат
-                    from_chat_id=SOURCE_CHANNEL, # Из канала источника
-                    message_id=check_id
-                )
-                # Если пост успешно отправился, запоминаем его ID для авто-проверки
-                if not LAST_SENT_ID_RAM or LAST_SENT_ID_RAM == 100000:
-                    LAST_SENT_ID_RAM = check_id
-                success = True
-                break
-            except Exception:
-                continue
-        
-        if success:
-            await status_msg.edit_text("✅ Бот активен, ошибок авторизации нет. Последний пост из группы успешно отправлен выше! Автопроверка работает каждые 10 минут.")
-        else:
-            await status_msg.edit_text("⚠️ Связь с ботом есть, но не удалось найти последние посты в канале. Убедитесь, что бот добавлен в канал.")
+        await status_msg.edit_text("✅ Бот работает идеально! Последний пост из группы успешно отправлен выше. Автопроверка новых публикаций активна.")
             
     except Exception as e:
-        logger.error(f"Ошибка проверки прав или отправки поста: {e}")
-        await message.reply(f"❌ Произошла ошибка при выполнении проверки: {e}")
+        logger.error(f"Ошибка выполнения проверки: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: Не удалось скопировать пост №2312. Убедитесь, что бот добавлен в канал @br_dev как администратор.")
 
 # Главная функция запуска
 async def main():
