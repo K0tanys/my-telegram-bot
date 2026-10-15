@@ -4,7 +4,8 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message
+from aiogram.enums import ParseMode
+from aiogram.types import Message, Update
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web, ClientSession
@@ -16,10 +17,11 @@ logger = logging.getLogger(__name__)
 # Инициализация переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL") # Автоматическая переменная Render
 
-# Канал-источник (для RSS используем открытый мост)
+# Стабильное альтернативное зеркало для чтения Telegram без блокировок
 SOURCE_CHANNEL = "br_dev"
-RSS_URL = f"https://rsshub.app{SOURCE_CHANNEL}"
+RSS_URL = f"https://v2ex.com{SOURCE_CHANNEL}"
 
 try:
     TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
@@ -30,36 +32,38 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# Храним ссылку или заголовок последнего отправленного поста, чтобы не спамить дубликатами
 LAST_SENT_POST_LINK = None
 
-# Фоновый веб-сервер для прохождения проверок Render
-async def handle_ping(request):
-    return web.Response(text="Got GameFloid активен и работает.")
+# Обработчик вебхуков от Telegram + пинг от Render
+async def handle_webhook(request):
+    # Если это простой запрос для проверки активности (Ping от Render или UptimeRobot)
+    if request.method == "GET":
+        return web.Response(text="Got GameFloid активен и работает через Webhook.")
+    
+    # Если это входящее сообщение от Telegram
+    try:
+        json_data = await request.json()
+        update = Update.model_validate(json_data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке вебхука: {e}")
+    
+    return web.Response(text="ok")
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", "10000"))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logger.info(f"Встроенный веб-сервер успешно запущен на порту {port}!")
-
-# Функция для парсинга RSS и поиска текста с картинкой
+# Функция парсинга RSS
 async def fetch_last_post():
     try:
         async with ClientSession() as session:
-            async with session.get(RSS_URL, timeout=15) as response:
+            # Используем кастомный User-Agent, чтобы сайт не блокировал хостинг
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.get(RSS_URL, headers=headers, timeout=15) as response:
                 if response.status != 200:
-                    logger.error(f"Ошибка при запросе к RSSHub: статус {response.status}")
+                    logger.error(f"Ошибка RSS: статус {response.status}")
                     return None
                 
                 xml_data = await response.text()
                 root = ET.fromstring(xml_data)
                 
-                # Ищем первый (самый свежий) пост в ленте <item>
                 item = root.find(".//item")
                 if item is None:
                     return None
@@ -68,15 +72,10 @@ async def fetch_last_post():
                 link = item.find("link").text if item.find("link") is not None else ""
                 description = item.find("description").text if item.find("description") is not None else ""
                 
-                # Очищаем текст от HTML-тегов, кроме ссылок на изображения
-                # Ищем картинку в теге <img src="...">
                 img_match = re.search(r'<img[^>]+src="([^"]+)"', description)
                 img_url = img_match.group(1) if img_match else None
                 
-                # Удаляем все HTML-теги из описания, чтобы Telegram не ругался
                 clean_text = re.sub(r'<[^>]+>', '', description).strip()
-                
-                # Если описание пустое, используем заголовок
                 if not clean_text:
                     clean_text = title
 
@@ -85,35 +84,32 @@ async def fetch_last_post():
         logger.error(f"Не удалось распарсить RSS: {e}")
         return None
 
-# Автоматический метод проверки обновлений
+# Автопроверка (каждые 10 минут)
 async def check_news():
     global LAST_SENT_POST_LINK
-    logger.info("Автопроверка: сканируем RSS-ленту чужого канала...")
+    logger.info("Автопроверка: сканируем стабильное RSS-зеркало...")
     
     post = await fetch_last_post()
     if not post:
         return
 
-    # Если этот пост мы уже отправляли — ничего не делаем
     if LAST_SENT_POST_LINK == post["link"]:
-        logger.info("Новых постов в RSS пока нет.")
+        logger.info("Новых публикаций в канале пока нет.")
         return
 
-    # Если бот только запустился, запоминаем текущий пост как отправленный
     if LAST_SENT_POST_LINK is None:
         LAST_SENT_POST_LINK = post["link"]
-        logger.info("Бот запущен. Первичный пост зафиксирован, ждем новые публикации.")
+        logger.info("Бот запущен. Текущий пост зафиксирован.")
         return
 
     thread_id = TOPIC_ID if TOPIC_ID != 0 else None
 
     try:
-        # Отправляем пост в вашу целевую группу
         if post["image"]:
             await bot.send_photo(
                 chat_id=TARGET_CHAT_ID,
                 photo=post["image"],
-                caption=post["text"][:1024], # Лимит Telegram на подпись к фото
+                caption=post["text"][:1024],
                 message_thread_id=thread_id
             )
         else:
@@ -122,22 +118,19 @@ async def check_news():
                 text=post["text"][:4096],
                 message_thread_id=thread_id
             )
-        
         LAST_SENT_POST_LINK = post["link"]
         logger.info("Новый пост успешно перенесен в группу!")
     except Exception as e:
-        logger.error(f"Ошибка при автоматической отправке поста: {e}")
+        logger.error(f"Ошибка автоматической отправки: {e}")
 
 # ХЭНДЛЕР КОМАНДЫ /check
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
     try:
-        status_msg = await message.reply("⏳ Связь установлена. Запрашиваю последний пост через RSS-мост...")
-        
+        status_msg = await message.reply("⏳ Запрашиваю последний пост через резервное RSS-зеркало...")
         post = await fetch_last_post()
         
         if post:
-            # Отправляем последний пост прямо вам в чат для проверки
             if post["image"]:
                 await bot.send_photo(
                     chat_id=message.chat.id,
@@ -151,28 +144,39 @@ async def cmd_check(message: Message):
                     text=f"<b>Последний пост из канала:</b>\n\n{post['text']}"[:4096],
                     parse_mode=ParseMode.HTML
                 )
-            await status_msg.edit_text("✅ Бот работает идеально! Последний пост успешно получен без прав администратора.")
+            await status_msg.edit_text("✅ Бот работает! Последний пост успешно получен без прав администратора.")
         else:
-            await status_msg.edit_text("⚠️ Не удалось получить данные из RSS-ленты. Возможно, зеркало временно недоступно.")
-            
+            await status_msg.edit_text("⚠️ Не удалось получить данные. Возможно, зеркало обновляется, попробуйте через пару минут.")
     except Exception as e:
-        logger.error(f"Ошибка выполнения проверки: {e}")
         await message.reply(f"❌ Произошла ошибка: {e}")
 
-# Главная функция запуска
+# Запуск сервера вебхуков
 async def main():
-    await start_web_server()
-    await bot.delete_webhook(drop_pending_updates=True)
+    app = web.Application()
+    # Обрабатываем и корень для пинга, и запросы от Telegram в одном месте
+    app.router.add_post("/", handle_webhook)
+    app.router.add_get("/", handle_webhook)
     
-    # Настройка планировщика на 10 минут
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Сервер Вебхуков запущен на порту {port}!")
+
+    # Настраиваем вебхук в самом Telegram
+    # Render автоматически предоставляет переменную RENDER_EXTERNAL_URL (например, https://onrender.com)
+    webhook_url = RENDER_EXTERNAL_URL if RENDER_EXTERNAL_URL else f"https://onrender.com"
+    await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    logger.info(f"Вебхук успешно привязан к адресу: {webhook_url}")
+
+    # Запуск планировщика
     scheduler.add_job(check_news, "interval", minutes=10)
     scheduler.start()
-    
-    # Первичный холостой запуск для фиксации текущего поста
     await check_news()
-    
-    logger.info("Бот успешно запущен в режиме Polling через RSS и готов принимать команды!")
-    await dp.start_polling(bot)
+
+    # Держим приложение запущенным
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
