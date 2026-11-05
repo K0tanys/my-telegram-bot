@@ -19,7 +19,27 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Точная рабочая ссылка для нарушителей на топик "Чат для общения"
-CHAT_LINK = "https://t.me/GameFloid/18600"
+CHAT_LINK = "https://t.me"
+
+# Полный словарь тем со всех твоих скриншотов
+TOPIC_NAMES = {
+    1: "General",
+    18600: "Чат для общения",
+    21617: "Дома/гаражи",
+    21619: "Авто",
+    21621: "Скины",
+    21622: "Аксы",
+    21655: "Бизнес",
+    21656: "Номерные знаки",
+    21657: "SIM-card",
+    21658: "Прочие услуги",
+    21660: "Правила группы",
+    22032: "Реклама семьи",
+    22422: "Безопасность сделок | Анти-Скам",
+    22436: "Жалобы на нарушителей",
+    25114: "Новости",
+    37914: "Промокоды"
+}
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
@@ -62,16 +82,19 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
     except Exception as err:
         logger.error(f"Не удалось принудительно удалить варн {warn_msg_id}: {err}")
 
-    # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ С ТОЧНОЙ ССЫЛКОЙ НА ТЕМУ ДЛЯ АДМИНОВ ---
+    # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ С НАЗВАНИЕМ ТЕМЫ ДЛЯ АДМИНОВ ---
     if ADMIN_CHAT_ID:
         try:
             mention = f"[{first_name}](tg://user?id={user_id})"
             tg_username = f" | @{username}" if username else ""
             
-            # Жесткое и прямое формирование ссылки без косяков парсера Markdown
+            # Находим имя темы из словаря
+            name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
+            
+            # Формирование ссылки на публичную тему
             if topic_id and topic_id != 0:
-                topic_link = f"https://t.me/GameFloid/{topic_id}"
-                topic_display = f"[Перейти в тему {topic_id}]({topic_link})"
+                topic_link = f"https://t.me{topic_id}"
+                topic_display = f"[Перейти в тему «{name_of_topic}»]({topic_link})"
             else:
                 topic_display = "`Основной чат`"
             
