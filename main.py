@@ -66,7 +66,7 @@ async def moderate_chat(message: Message):
     if is_target_bot:
         try:
             await message.delete()
-            logger.info(f"Мгновенно удалено сообщение стороннего бота/юзербота в топике {current_topic}")
+            logger.info(f"Мгновенно удалено прямое сообщение стороннего бота/юзербота в топике {current_topic}")
         except Exception:
             pass
         return
@@ -103,29 +103,29 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg.message_id})")
 
-                # 3. РАСШИРЕННАЯ БРОНЕБОЙНАЯ ОЧИСТКА ДО +10 ID ВПЕРЕД
+                # 3. УЛУЧШЕННАЯ МГНОВЕННАЯ ОЧИСТКА ВПЕРЕД
                 async def secure_id_cleanup(chat_id, cmd_id, warn_msg):
-                    # Проверяем чат 6 раз подряд с интервалом в 1 секунду
-                    for cycle in range(6):
-                        await asyncio.sleep(1.0)
-
-                        # Расширили диапазон сканирования: проверяем до 10 сообщений вперед,
-                        # чтобы гарантированно накрыть кнопочный ответ чужого бота
-                        for next_id in range(cmd_id + 1, cmd_id + 11):
+                    # Проверяем чат 15 раз подряд с микро-интервалами, начиная МГНОВЕННО
+                    for cycle in range(15):
+                        # Расширили диапазон сканирования до 15 сообщений вперед
+                        for next_id in range(cmd_id + 1, cmd_id + 16):
                             # Свой собственный варн не трогаем
                             if next_id == warn_msg.message_id:
                                 continue
                             try:
                                 await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                                logger.info(f"В цикле {cycle+1} принудительно удален проскочивший ответ бота (ID: {next_id})")
+                                logger.info(f"В цикле {cycle+1} принудительно удален ответ бота (ID: {next_id})")
                             except Exception:
                                 pass
+                        
+                        # Небольшая пауза между циклами для ожидания генерации ответа юзерботом
+                        await asyncio.sleep(0.5)
 
-                    # Ждем окончания 4 секунд видимости варна и удаляем его
-                    await asyncio.sleep(4.0)
+                    # Ждем оставшееся время до 10 секунд общей видимости варна и удаляем его
+                    await asyncio.sleep(2.5)
                     try:
                         await warn_msg.delete()
-                        logger.info("Временное предупреждение успешно удалено.")
+                        logger.info("Временное предупреждение (10 сек) успешно удалено.")
                     except Exception as err:
                         logger.error(f"Не удалось удалить варн: {err}")
 
