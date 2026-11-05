@@ -18,7 +18,7 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ИСПРАВЛЕНО: Полная рабочая ссылка для нарушителей на топик "Чат для общения"
+# Точная, полная рабочая ссылка для нарушителей на топик "Чат для общения"
 CHAT_LINK = "https://t.me/GameFloid/18600"
 
 # Полный словарь тем со всех твоих скриншотов
@@ -35,7 +35,7 @@ TOPIC_NAMES = {
     21658: "Прочие услуги",
     21660: "Правила группы",
     22032: "Реклама семьи",
-    22422: "Безопасность сделок | Анти-Скам",
+    22422: "Безопасность сделок | Anti-Скам",
     22436: "Жалобы на нарушителей",
     25114: "Новости",
     37914: "Промокоды"
@@ -91,7 +91,7 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
             # Находим имя темы из словаря
             name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
             
-            # Чистая и надежная сборка ссылки строго по твоему образцу (https://t.me)
+            # Точная сборка ссылки для админа с полным адресом группы GameFloid
             if topic_id and topic_id != 0:
                 full_url = f"https://t.me/GameFloid/{topic_id}"
                 topic_display = f"[{name_of_topic}]({full_url})"
@@ -163,14 +163,15 @@ async def moderate_chat(message: Message):
                 await message.delete()
                 logger.info(f"Мгновенно стерта команда пользователя {command_msg_id} в теме {current_topic}")
 
-                # 2. Отправляем предупреждение через HTML с точной рабочей ссылкой
-                user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
+                # 2. Отправляем предупреждение через Маркдаун с точной полной ссылкой
+                user_mention = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
                 warning_text = (
-                    f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
-                    f"можно строго в теме <b><a href='{CHAT_LINK}'>Чат для общения</a></b>!"
+                    f"⚠️ {user_mention}, использовать команды бота **BR Assistant**\n"
+                    f"можно строго в теме **[Чат для общения]({CHAT_LINK})**!"
                 )
 
-                warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
+                # Отправляем варн нарушителю через Markdown (так же, как и отчет админам)
+                warn_msg = await message.answer(warning_text, parse_mode="Markdown", disable_web_page_preview=True)
                 warn_msg_id = warn_msg.message_id
                 logger.info(f"Предупреждение отправлено в тему {current_topic} (ID варна: {warn_msg_id})")
 
