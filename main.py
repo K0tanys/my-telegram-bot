@@ -87,7 +87,7 @@ async def moderate_chat(message: Message):
                 # Задержка перед выводом предупреждения (1 секунда)
                 await asyncio.sleep(1.0)
                 
-                # 2. Отправляем предупреждение через HTML (теперь без лишних слэшей)
+                # 2. Отправляем предупреждение через HTML (ники отображаются ровно, без слэшей)
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
                 warning_text = (
                     f"⚠️ {user_html_mention}, использовать команды бота <b>Black Russia Assistant</b> "
@@ -97,13 +97,13 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic}")
                 
-                # 3. Ждем 10 секунд и удаляем НАШЕ предупреждение, чтобы оно не висело долго
+                # 3. Ждем 10 секунд и удаляем НАШЕ предупреждение
                 await asyncio.sleep(10)
                 await warn_msg.delete()
                 logger.info(f"Предупреждение удалено, но режим зачистки топика {current_topic} продолжается...")
                 
-                # 4. Ждем ЕЩЕ 5 секунд (итого 15 секунд защиты чата), чтобы поймать супер-медленные ответы BR Assist
-                await asyncio.sleep(5)
+                # 4. Ждем ЕЩЕ 15 секунд (суммарно 25 секунд защиты топика) для полной ликвидации тормозящего BR Assist
+                await asyncio.sleep(15)
                 
                 # Полностью выключаем режим зачистки для этого топика
                 active_cleanup_topics.discard(current_topic)
