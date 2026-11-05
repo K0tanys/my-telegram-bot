@@ -19,7 +19,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Ссылка для нарушителей строго со скриншота
-CHAT_LINK = "https://t.me/GameFloid/18600"
+CHAT_LINK = "https://t.me"
 
 # Полный словарь тем
 TOPIC_NAMES = {
@@ -75,7 +75,7 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
             name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
             
             if topic_id and topic_id != 0:
-                full_url = f"https://t.me/GameFloid/{topic_id}"
+                full_url = f"https://t.me{topic_id}"
                 topic_display = f'<a href="{full_url}">{name_of_topic}</a>'
             else:
                 topic_display = "<code>Основной чат</code>"
@@ -107,7 +107,7 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
     except Exception as e:
         logger.error(f"Ошибка патруля хвостов: {e}")
 
-    # Ждем, чтобы пользователь успел прочесть варн (увеличено до 10 секунд общего времени)
+    # Ждем, чтобы пользователь успел прочесть варн
     await asyncio.sleep(10.5)
     
     # Принудительное удаление варна бота
@@ -120,6 +120,10 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
 # 2. ОБЩИЙ ХЕНДЛЕР ДЛЯ МОДЕРАЦИИ И УВЕДОМЛЕНИЙ
 @dp.message()
 async def moderate_chat(message: Message):
+    # ЖЕСТКАЯ ЗАЩИТА: Если сообщение пришло из чата админов — бот его ВООБЩЕ не модерирует
+    if ADMIN_CHAT_ID and message.chat.id == ADMIN_CHAT_ID:
+        return
+
     current_topic = message.message_thread_id if message.message_thread_id else 0
 
     # Если это разрешенный "Чат для общения" — игнорируем
@@ -168,7 +172,7 @@ async def moderate_chat(message: Message):
                 await message.delete()
                 logger.info(f"Мгновенно стерта команда пользователя {command_msg_id} в теме {current_topic}")
 
-                # 2. Отправляем предупреждение через HTML (ссылка жестко со скриншота)
+                # 2. Отправляем предупреждение через HTML
                 safe_first_name = message.from_user.first_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 user_mention = f'<a href="tg://user?id={message.from_user.id}">{safe_first_name}</a>'
                 
