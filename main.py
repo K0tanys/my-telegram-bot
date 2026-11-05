@@ -48,14 +48,13 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ СТОРОННЕГО БОТА ---
-    # Перехватывает любые сообщения ботов «на лету» в реальном времени
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ ЛЮБОГО БОТА (Если вебхук прилетел сразу) ---
     if message.from_user.is_bot:
         try:
             await message.delete()
             logger.info(f"❌ Мгновенно удален долетевший ответ стороннего бота в топике {current_topic}")
-        except Exception as e:
-            logger.error(f"Не удалось удалить сообщение стороннего бота: {e}")
+        except Exception:
+            pass
         return
 
     # --- СЦЕНАРИЙ 2: КОМАНДА ОТ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ ---
@@ -73,9 +72,12 @@ async def moderate_chat(message: Message):
         
         if text.startswith(target_commands):
             try:
+                command_msg_id = message.message_id
+                chat_id = message.chat.id
+                
                 # 1. Мгновенно удаляем запрещенную команду юзера
                 await message.delete()
-                logger.info(f"🧹 Удалена команда от пользователя {message.from_user.id} в топике {current_topic}")
+                logger.info(f"🧹 Удалена команда (ID: {command_msg_id}) в топике {current_topic}")
                 
                 # 2. Отправляем предупреждение через HTML
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
@@ -87,18 +89,38 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic}")
                 
-                # 3. ЗАПУСКАЕМ НЕЗАВИСИМУЮ ПОДСТРАХОВКУ ЧАТА (В фоне)
-                # Она проспит 1.5 секунды, пока долетает запоздалый ответ чужого бота, 
-                # и принудительно зачистит топик вокруг нашего варна.
-                async def background_cleanup_insurance(chat_id, topic_id, warn_message, user_id):
-                    # Даем 1.5 секунды чужому боту выстрелить (если хостинг тормозит)
+                # 3. ЗАПУСКАЕМУЮ УМНУЮ СТРАХОВКУ С ПРОВЕРКОЙ НА БОТА (В фоне)
+                async def smart_id_cleanup(chat_id, cmd_id, warn_message):
+                    # Даем чужому боту 1.5 секунды, чтобы его сообщение точно долетело до серверов Telegram
                     await asyncio.sleep(1.5)
                     
-                    # Пытаемся точечно поймать и удалить сообщение чужого бота, которое могло прилететь сразу ЗА нашей командой.
-                    # Для этого мы проверяем ID сообщений вокруг. Ответ чужого бота будет иметь ID на 1 или 2 больше, чем удаленная команда.
-                    # Мы просто подстрахуемся и удалим следующее за варном сообщение, ЕСЛИ оно прилетит от бота.
+                    # Сканируем следующие ID сообщений вперед
+                    for next_id in range(cmd_id + 1, cmd_id + 5):
+                        # Пропускаем ID нашего собственного варна, его удалять еще рано
+                        if next_id == warn_message.message_id:
+                            continue
+                        
+                        try:
+                            # Трюк: пересылаем сообщение самому себе во внутренний буфер, чтобы прочитать его структуру
+                            # и узнать, кто его автор, не вызывая ошибок в основном чате
+                            forwarded = await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=next_id)
+                            is_target_bot = forwarded.forward_from.is_bot if forwarded.forward_from else False
+                            
+                            # Удаляем техническую копию сообщения из буфера
+                            await forwarded.delete()
+                            
+                            # Если проверка подтвердила, что это сообщение от БОТА — принудительно стираем оригинал в группе
+                            if is_target_bot:
+                                await bot.delete_message(chat_id=chat_id, message_id=next_id)
+                                logger.info(f"🎯 Снайперски удален проскочивший ответ бота (ID: {next_id})")
+                            else:
+                                logger.info(f"ℹ️ Сообщение {next_id} принадлежит обычному человеку. Пропускаем.")
+                                
+                        except Exception:
+                            # Если сообщения с таким ID еще нет или нет прав — просто идем к следующему
+                            pass
                     
-                    # Спим оставшиеся 8.5 секунд (суммарно 10 секунд видимости варна)
+                    # Дожидаемся окончания 10 секунд и удаляем наше предупреждение
                     await asyncio.sleep(8.5)
                     try:
                         await warn_message.delete()
@@ -106,7 +128,7 @@ async def moderate_chat(message: Message):
                     except Exception as err:
                         logger.error(f"Не удалось удалить варн: {err}")
                 
-                asyncio.create_task(background_cleanup_insurance(message.chat.id, current_topic, warn_msg, message.from_user.id))
+                asyncio.create_task(smart_id_cleanup(chat_id, command_msg_id, warn_msg))
                 
             except Exception as e:
                 logger.error(f"Ошибка в процессе модерации: {e}")
