@@ -21,12 +21,6 @@ dp = Dispatcher()
 # Твоя прямая ссылка на тему "Чат общения"
 CHAT_LINK = "https://t.me"
 
-# Список всех возможных юзернеймов чужого бота для его 100% ликвидации
-TARGET_BOT_USERNAMES = ("blackrussiaassistantbot", "brassgay")
-
-# Список активных топиков, где прямо сейчас тикает режим зачистки
-active_cleanup_topics = set()
-
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
     if not RENDER_URL:
@@ -54,17 +48,14 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ БОТА BR ASSIST ---
+    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ ЛЮБОГО ЧУЖОГО БОТА ---
+    # В запрещенных темах сообщения от любых других ботов не нужны. Удаляем их всегда и мгновенно!
     if message.from_user.is_bot:
-        username = message.from_user.username.lower() if message.from_user.username else ""
-        
-        # Проверяем, совпадает ли юзернейм бота с любым из списка БР Ассистента
-        if username in TARGET_BOT_USERNAMES and current_topic in active_cleanup_topics:
-            try:
-                await message.delete()
-                logger.info(f"❌ Перехвачен и удален ответ бота @{username} в топике {current_topic}")
-            except Exception as e:
-                logger.error(f"Не удалось удалить сообщение стороннего бота: {e}")
+        try:
+            await message.delete()
+            logger.info(f"❌ Мгновенно удален ответ стороннего бота (ID: {message.from_user.id}) в топике {current_topic}")
+        except Exception as e:
+            logger.error(f"Не удалось удалить сообщение стороннего бота: {e}")
         return
 
     # --- СЦЕНАРИЙ 2: КОМАНДА ОТ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ ---
@@ -82,17 +73,11 @@ async def moderate_chat(message: Message):
         
         if text.startswith(target_commands):
             try:
-                # Включаем режим усиленной зачистки для этого топика
-                active_cleanup_topics.add(current_topic)
-                
                 # 1. Мгновенно удаляем запрещенную команду юзера
                 await message.delete()
-                logger.info(f"🧹 Удалена команда от пользователя {message.from_user.id} in topic {current_topic}")
+                logger.info(f"🧹 Удалена команда от пользователя {message.from_user.id} в топике {current_topic}")
                 
-                # Задержка перед выводом предупреждения (1 секунда)
-                await asyncio.sleep(1.0)
-                
-                # 2. Отправляем предупреждение через HTML (ники отображаются ровно, без слэшей)
+                # 2. Отправляем предупреждение через HTML
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
                 warning_text = (
                     f"⚠️ {user_html_mention}, использовать команды бота <b>Black Russia Assistant</b> "
@@ -102,21 +87,20 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic}")
                 
-                # 3. Ждем 10 секунд и удаляем НАШЕ предупреждение
-                await asyncio.sleep(10)
-                await warn_msg.delete()
-                logger.info(f"Предупреждение удалено, но режим зачистки топика {current_topic} продолжается...")
+                # 3. Запускаем отдельную независимую задачу на удаление предупреждения через 10 секунд,
+                # чтобы основной поток модерации не засыпал ни на секунду!
+                async def delete_warning_later(msg_to_delete):
+                    await asyncio.sleep(10)
+                    try:
+                        await msg_to_delete.delete()
+                        logger.info("Временное предупреждение успешно удалено.")
+                    except Exception as err:
+                        logger.error(f"Не удалось удалить варн: {err}")
                 
-                # 4. Ждем ЕЩЕ 15 секунд (суммарно 25 секунд защиты топика) для полной ликвидации чужого бота
-                await asyncio.sleep(15)
-                
-                # Полностью выключаем режим зачистки для этого топика
-                active_cleanup_topics.discard(current_topic)
-                logger.info(f"Режим зачистки топика {current_topic} полностью завершен.")
+                asyncio.create_task(delete_warning_later(warn_msg))
                 
             except Exception as e:
                 logger.error(f"Ошибка в процессе модерации: {e}")
-                active_cleanup_topics.discard(current_topic)
 
 # 3. ОБРАБОТЧИК ВЕБХУКОВ
 async def handle_webhook(request):
