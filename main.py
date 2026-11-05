@@ -65,7 +65,7 @@ async def moderate_chat(message: Message):
             await message.delete()
             logger.info(f"Мгновенно удалено входящее сообщение BR Assistant в топике {current_topic}")
         except Exception as e:
-            logger.error(f"Ошибка мгновенного удаления: {e}")
+            logger.warning(f"Не удалось мгновенно удалить входящее сообщение BR Assistant: {e}")
         return
 
     # --- СЦЕНАРИЙ 2: КОМАНДА ОТ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ ---
@@ -100,23 +100,25 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg.message_id})")
 
-                # 3. ТОЧЕЧНЫЙ КОНТРОЛЬ ЗА ЧУЖИМ БОТОМ (10 СЕКУНД)
+                # 3. ТОЧЕЧНЫЙ КОНТРОЛЬ С ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ (10 СЕКУНД)
                 async def targeted_cleanup(chat_id, start_id, warn_to_delete):
                     # Проверяем чат в течение 10 секунд
                     for cycle in range(10):
                         await asyncio.sleep(1.0)
                         
-                        # Проверяем строго следующие 15 ID сообщений
+                        # Проверяем строго следующие 15 ID сообщений вперед
                         for next_id in range(start_id + 1, start_id + 16):
                             if next_id == warn_to_delete.message_id:
                                 continue
                             try:
-                                # Чтобы узнать автора сообщения с кнопками, запрашиваем его удаление точечно.
-                                # Наш бот пытается удалить только то, что прислал юзербот или сторонний бот.
                                 await bot.delete_message(chat_id=chat_id, message_id=next_id)
                                 logger.info(f"В цикле {cycle+1} точечно уничтожен ответ стороннего бота (ID: {next_id})")
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                # Если ошибка НЕ связана с тем, что сообщения просто нет ("message to delete not found"),
+                                # выводим реальную причину отказа от Telegram в логи.
+                                error_msg = str(e)
+                                if "message to delete not found" not in error_msg.lower():
+                                    logger.warning(f"Цикл {cycle+1}: Ошибка удаления ID {next_id} -> {error_msg}")
 
                     # Удаляем только своё предупреждение по истечении 10 секунд
                     try:
