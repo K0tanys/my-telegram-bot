@@ -18,7 +18,7 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Точная и полная рабочая ссылка для нарушителей на топик "Чат для общения"
+# Точная рабочая ссылка для нарушителей на топик "Чат для общения"
 CHAT_LINK = "https://t.me"
 
 # Полный словарь тем со всех твоих скриншотов
@@ -85,29 +85,29 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
     # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ С НАЗВАНИЕМ ТЕМЫ ДЛЯ АДМИНОВ ---
     if ADMIN_CHAT_ID:
         try:
-            # Используем HTML разметку для стабильного формирования ссылок
-            user_mention = f'<a href="tg://user?id={user_id}">{first_name}</a>'
+            mention = f"[{first_name}](tg://user?id={user_id})"
             tg_username = f" | @{username}" if username else ""
             
             # Находим имя темы из словаря
             name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
             
-            # Точное формирование ссылки по твоему образцу (https://t.me)
+            # Чистая и надежная сборка ссылки строго по твоему образцу (https://t.me)
             if topic_id and topic_id != 0:
-                topic_display = f'<a href="https://t.me/GameFloid/{topic_id}">{name_of_topic}</a>'
+                full_url = f"https://t.me/GameFloid/{topic_id}"
+                topic_display = f"[{name_of_topic}]({full_url})"
             else:
-                topic_display = "<b>Основной чат</b>"
+                topic_display = "`Основной чат`"
             
             report_text = (
-                "🚨 <b>Отчёт о нарушении правил чата</b>\n\n"
-                f"👤 <b>Нарушитель:</b> {user_mention}{tg_username}\n"
-                f"🆔 <b>ID пользователя:</b> {user_id}\n"
-                f"🏷 <b>Тема нарушения:</b> {topic_display}\n"
-                f"⌨️ <b>Запрещённая команда:</b> {command_text}\n\n"
-                "🗑 <i>Команда пользователя и предупреждение бота успешно зачищены.</i>"
+                "🚨 **Отчёт о нарушении правил чата**\n\n"
+                f"👤 **Нарушитель:** {mention}{tg_username}\n"
+                f"🆔 **ID пользователя:** `{user_id}`\n"
+                f"🏷 **Тема нарушения:** {topic_display}\n"
+                f"⌨️ **Запрещённая команда:** `{command_text}`\n\n"
+                "🗑 *Команда пользователя и предупреждение бота успешно зачищены.*"
             )
-            # Отправляем текстовый отчёт в админ-чат через HTML режим
-            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_text, parse_mode="HTML", disable_web_page_preview=True)
+            # Отправляем текстовый отчёт в админ-чат через чистый Markdown
+            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_text, parse_mode="Markdown")
             logger.info(f"Отчёт по пользователю {user_id} успешно отправлен администрации.")
         except Exception as e:
             logger.error(f"Не удалось отправить отчёт админам: {e}")
