@@ -18,7 +18,7 @@ RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Твоя прямая ссылка на тему "Чат общения"
+# Твоя точная прямая ссылка на тему "Чат общения"
 CHAT_LINK = "https://t.me"
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
@@ -89,30 +89,26 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg.message_id})")
                 
-                # 3. ЗАПУСКАЕМ ЖЕЛЕЗОБЕТОННУЮ УВЕРЕННУЮ ОЧИСТКУ ПО ID С ПОВТОРНЫМИ ПРОВЕРКАМИ (В фоне)
+                # 3. РАСШИРЕННАЯ БРОНЕБОЙНАЯ ОЧИСТКА ДО +10 ID ВПЕРЕД
                 async def secure_id_cleanup(chat_id, cmd_id, warn_message):
-                    # Чужой бот может выплюнуть ответ мгновенно или задержаться. 
-                    # Поэтому мы сделаем несколько циклов проверки с микропаузами в течение первых 4 секунд.
-                    for cycle in range(5):
-                        await asyncio.sleep(0.8) # Ждем чуть меньше секунды между проверками
+                    # Проверяем чат 6 раз подряд с интервалом в 1 секунду
+                    for cycle in range(6):
+                        await asyncio.sleep(1.0)
                         
-                        # Сканируем диапазон ID вокруг нашей команды и варна
-                        # Например, если команда 100, а варн 101, то ответ чужого бота гарантированно будет иметь ID 102 или 103.
-                        for next_id in range(cmd_id + 1, cmd_id + 5):
-                            # Ни в коем случае не трогаем ID нашего собственного варна
+                        # Расширили диапазон сканирования: проверяем до 10 сообщений вперед,
+                        # чтобы гарантированно накрыть кнопочный ответ чужого бота
+                        for next_id in range(cmd_id + 1, cmd_id + 11):
+                            # Свой собственный варн не трогаем
                             if next_id == warn_message.message_id:
                                 continue
                             try:
-                                # Даем Telegram прямой приказ на удаление ID без предварительного чтения
                                 await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                                logger.info(f"🎯 Принудительно уничтожено проскочившее сообщение чужого бота (ID: {next_id})")
+                                logger.info(f"🎯 В цикле {cycle+1} принудительно удален проскочивший ответ бота (ID: {next_id})")
                             except Exception:
-                                # Если сообщения с таким ID еще нет, или это чужой юзер (которого нельзя удалить без жалобы),
-                                # Telegram просто вернет ошибку, и код пойдет дальше без сбоев.
                                 pass
                     
-                    # Дожидаемся окончания общего времени (10 секунд общего времени жизни варна)
-                    await asyncio.sleep(5.0)
+                    # Ждем окончания 10 секунд видимости варна и удаляем его
+                    await asyncio.sleep(4.0)
                     try:
                         await warn_message.delete()
                         logger.info("Временное предупреждение успешно удалено.")
