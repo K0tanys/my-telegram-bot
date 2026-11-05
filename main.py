@@ -18,10 +18,6 @@ RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Фильтры для распознавания стороннего бота
-TARGET_BOT_USERNAME = "blackrussiaassistantbot"
-TARGET_BOT_NAME_PART = "assist"
-
 # Твоя прямая ссылка на тему "Чат общения"
 CHAT_LINK = "https://t.me/GameFloid/18600"
 
@@ -55,18 +51,15 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ БОТА BR ASSIST ---
+    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ АБСОЛЮТНО ЛЮБОГО БОТА В МОМЕНТ ЗАЧИСТКИ ---
     if message.from_user.is_bot:
-        username = message.from_user.username.lower() if message.from_user.username else ""
-        first_name = message.from_user.first_name.lower() if message.from_user.first_name else ""
-        
-        # Если это BR Assistant И в данном топике сейчас включен режим усиленной зачистки
-        if (TARGET_BOT_USERNAME in username or TARGET_BOT_NAME_PART in first_name) and current_topic in active_cleanup_topics:
+        # Если в этой теме сейчас тикают 10 секунд зачистки — сносим любого бота без разбора имени
+        if current_topic in active_cleanup_topics:
             try:
                 await message.delete()
-                logger.info(f"❌ Перехвачен и удален запоздалый ответ бота BR Assist в топике {current_topic}")
+                logger.info(f"❌ Перехвачен и удален ответ бота (ID: {message.from_user.id}) в топике {current_topic}")
             except Exception as e:
-                logger.error(f"Не удалось удалить запоздалое сообщение стороннего бота: {e}")
+                logger.error(f"Не удалось удалить сообщение стороннего бота: {e}")
         return
 
     # --- СЦЕНАРИЙ 2: КОМАНДА ОТ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ ---
