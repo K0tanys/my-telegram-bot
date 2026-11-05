@@ -3,7 +3,6 @@ import logging
 import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
-from aiomodels import web  # в aiogram 3.x используется aiohttp под капотом, web импортируется из aiohttp
 from aiohttp import web, ClientSession
 
 # Настройка логирования
@@ -50,7 +49,7 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ ЛЮБОГО БОТА (Если вебхук долетел сразу) ---
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ ЛЮБОГО БОТА ---
     if message.from_user.is_bot:
         try:
             await message.delete()
@@ -97,10 +96,8 @@ async def moderate_chat(message: Message):
                     for cycle in range(6):
                         await asyncio.sleep(1.0)
 
-                        # Расширили диапазон сканирования: проверяем до 10 сообщений вперед,
-                        # чтобы гарантированно накрыть кнопочный ответ чужого бота
+                        # Проверяем до 10 сообщений вперед, чтобы накрыть ответ чужого бота
                         for next_id in range(cmd_id + 1, cmd_id + 11):
-                            # Свой собственный варн не трогаем
                             if next_id == warn_msg.message_id:
                                 continue
                             try:
@@ -123,7 +120,7 @@ async def moderate_chat(message: Message):
                 logger.error(f"Ошибка в процессе модерации: {e}")
 
 
-# 3. ОБРАБОТЧИК ВЕБХУКОВ (Исправленная версия)
+# 3. ОБРАБОТЧИК ВЕБХУКОВ
 async def handle_webhook(request):
     if request.method == "GET":
         return web.Response(text="Сервер активен. Функция автопинга работает.", status=200)
