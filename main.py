@@ -18,8 +18,8 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Точная рабочая ссылка для нарушителей на топик "Чат для общения"
-CHAT_LINK = "https://t.me"
+# ИСПРАВЛЕНО: Полная рабочая ссылка для нарушителей на топик "Чат для общения"
+CHAT_LINK = "https://t.me/GameFloid/18600"
 
 # Полный словарь тем со всех твоих скриншотов
 TOPIC_NAMES = {
