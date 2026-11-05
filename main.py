@@ -1,160 +1,114 @@
 import asyncio
 import logging
 import os
-import re
-from aiogram import Bot, Dispatcher
-from aiogram.enums import ParseMode
-from aiogram.types import Update, Message
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
 from aiohttp import web, ClientSession
-from bs4 import BeautifulSoup
 
-# Наше оригинальное логирование
+# Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
-
-# Юзернейм канала
-SOURCE_CHANNEL = "br_dev"  
-
-try:
-    TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
-except (ValueError, TypeError):
-    TOPIC_ID = 0
+# ID темы "Чат общения", где разрешено использовать команду
+ALLOWED_TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
+# URL твоего приложения на Render (берется автоматически из настроек)
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-LAST_SENT_POST_LINK = None
+# Словарь для отслеживания недавних нарушителей (очищается автоматически)
+user_commands = {}
 
-# Обработчик входных вебхуков от Telegram и пингов от Render
+# 1. ФОНОВАЯ ЗАДАЧА ДЛЯ ЗАЩИТЫ ОТ СНА (ПИНГЕР)
+async def keep_alive():
+    """Каждые 35 секунд пингует сам себя, чтобы Render не тушил сервер"""
+    if not RENDER_URL:
+        logger.warning("RENDER_EXTERNAL_URL не найдена. Автопинг отключен.")
+        return
+
+    logger.info(f"Фоновый автопинг запущен для адреса: {RENDER_URL}")
+    await asyncio.sleep(10)  # Даем серверу полностью запуститься перед первым пингом
+    
+    async with ClientSession() as session:
+        while True:
+            try:
+                # Отправляем легкий GET-запрос на собственный URL
+                async with session.get(RENDER_URL, timeout=10) as response:
+                    logger.info(f"⏰ Автопинг выполнен успешно. Статус сервера: {response.status}")
+            except Exception as e:
+                logger.error(f"Ошибка при выполнении автопинга: {e}")
+            
+            # Спим 35 секунд (меньше лимита в 50 секунд, чтобы сервер гарантированно не заснул)
+            await asyncio.sleep(35)
+
+# 2. ХЭНДЛЕР ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ
+@dp.message(F.text)
+async def handle_user_command(message: Message):
+    if message.from_user.is_bot:
+        return
+
+    text = message.text.lower().strip()
+    
+    if text.startswith(("/online", "!online", "онлайн", "online")):
+        current_topic = message.message_thread_id if message.message_thread_id else 0
+        
+        if current_topic != ALLOWED_TOPIC_ID:
+            try:
+                user_commands[message.from_user.id] = message.message_id
+                await message.delete()
+                logger.info(f"Удалена команда /online от пользователя {message.from_user.id}")
+            except Exception as e:
+                logger.error(f"Не удалось удалить сообщение пользователя: {e}")
+
+# 3. ХЭНДЛЕР ДЛЯ ОТВЕТА БОТА BR ASSIST
+@dp.message(F.reply_to_message | F.text)
+async def handle_bot_reply(message: Message):
+    if not message.from_user.is_bot:
+        return
+
+    current_topic = message.message_thread_id if message.message_thread_id else 0
+    
+    if current_topic != ALLOWED_TOPIC_ID:
+        is_target_reply = False
+        
+        if message.reply_to_message:
+            is_target_reply = True
+        else:
+            text = message.text.lower() if message.text else ""
+            if "онлайн" in text or "server" in text or "игроки" in text:
+                is_target_reply = True
+
+        if is_target_reply:
+            try:
+                await asyncio.sleep(0.5)
+                await message.delete()
+                logger.info(f"Успешно удален ответ стороннего бота в запрещенной теме")
+            except Exception as e:
+                logger.error(f"Не удалось удалить ответ бота: {e}")
+
+# 4. ОБРАБОТЧИК ВЕБХУКОВ (Сюда прилетают пинги и апдейты от Telegram)
 async def handle_webhook(request):
-    if request.method in ("GET", "HEAD"):
-        return web.Response(text="Бот активен и работает через Webhook.", status=200)
+    if request.method == "GET":
+        return web.Response(text="Сервер активен. Функция автопинга работает.", status=200)
     
     try:
         json_data = await request.json()
-        update = Update.model_validate(json_data, context={"bot": bot})
+        update = dp.feed_raw_update(bot, json_data)
         await dp.feed_update(bot, update)
         return web.Response(text="ok", status=200)
     except Exception as e:
-        logger.error(f"Ошибка при обработке вебхука: {e}")
+        logger.error(f"Ошибка вебхука: {e}")
         return web.Response(text="error", status=400)
 
-# Функция чтения постов канала напрямую через BeautifulSoup
-async def fetch_last_post():
-    # ИСПРАВЛЕНО: Используем telegram.me/s/ вместо t.me/s/ для обхода блокировки DNS на Render
-    url = f"https://telegram.me{SOURCE_CHANNEL}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
-    async with ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, timeout=15) as response:
-                if response.status != 200:
-                    logger.error(f"Ошибка парсинга канала: статус {response.status}")
-                    return None
+# Очистка словаря раз в час, чтобы не забивать ОЗУ
+async def memory_cleaner():
+    while True:
+        await asyncio.sleep(3600)
+        user_commands.clear()
+        logger.info("Внутренняя память кэша команд очищена.")
 
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                messages = soup.find_all('div', class_='tgme_widget_message_wrap')
-                if not messages:
-                    logger.warning("Посты в канале не найдены. Проверьте SOURCE_CHANNEL.")
-                    return None
-
-                last_message = messages[-1]
-
-                # Извлекаем текст поста
-                text_block = last_message.find('div', class_='tgme_widget_message_text')
-                clean_text = text_block.get_text(separator='\n') if text_block else ""
-                
-                if not clean_text:
-                    return None
-
-                # Извлекаем картинку (если она есть)
-                img_block = last_message.find('a', class_='tgme_widget_message_photo_styled')
-                img_url = None
-                if img_block and 'style' in img_block.attrs:
-                    style = img_block['style']
-                    if "url('" in style:
-                        img_url = style.split("url('").split("')")
-
-                post_link = str(hash(clean_text))
-
-                return {
-                    "text": clean_text,
-                    "image": img_url,
-                    "link": post_link
-                }
-
-        except Exception as e:
-            logger.error(f"Не удалось распарсить Telegram напрямую: {e}")
-            return None
-
-# Автопроверка (каждые 10 минут)
-async def check_news():
-    global LAST_SENT_POST_LINK
-    logger.info("Автопроверка: сканируем открытую веб-страницу канала...")
-    
-    post = await fetch_last_post()
-    if not post:
-        return
-
-    if LAST_SENT_POST_LINK == post["link"]:
-        logger.info("Новых публикаций в канале пока нет.")
-        return
-
-    if LAST_SENT_POST_LINK is None:
-        LAST_SENT_POST_LINK = post["link"]
-        logger.info("Парсер инициализирован. Ждем новые публикации.")
-        return
-
-    thread_id = TOPIC_ID if TOPIC_ID != 0 else None
-
-    try:
-        if post["image"]:
-            await bot.send_photo(
-                chat_id=TARGET_CHAT_ID,
-                photo=post["image"],
-                caption=post["text"][:1024],
-                message_thread_id=thread_id
-            )
-        else:
-            await bot.send_message(
-                chat_id=TARGET_CHAT_ID,
-                text=post["text"][:4096],
-                message_thread_id=thread_id
-            )
-        
-        LAST_SENT_POST_LINK = post["link"]
-        logger.info("Успешно перенесен новый пост")
-    except Exception as e:
-        logger.error(f"Ошибка при автоматической отправке: {e}")
-
-# Хэндлер команды /check
-@dp.message(Command("check"))
-async def cmd_check(message: Message):
-    try:
-        post = await fetch_last_post()
-        
-        if post:
-            if post["image"]:
-                await bot.send_photo(chat_id=message.chat.id, photo=post["image"], caption=post["text"][:1024])
-            else:
-                await bot.send_message(chat_id=message.chat.id, text=post["text"][:4096])
-        
-        await message.reply(
-            "✅ Бот активен, ошибок авторизации нет.\n"
-            "Автопроверка работает каждые 10 минут."
-        )
-    except Exception as e:
-        logger.error(f"Ошибка выполнения проверки: {e}")
-
-# Основная асинхронная функция запуска веб-сервера
 async def main_async():
     app = web.Application()
     app.router.add_post("/", handle_webhook)
@@ -166,19 +120,16 @@ async def main_async():
     port = int(os.getenv("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Встроенный веб-сервер успешно запущен на порту {port}!")
     
-    webhook_url = os.getenv("RENDER_EXTERNAL_URL", "https://onrender.com")
-    await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    logger.info(f"Вебхук успешно установлен на: {webhook_url}")
-    
-    async def loop_scheduler():
-        while True:
-            await check_news()
-            await asyncio.sleep(600)
+    if RENDER_URL:
+        await bot.set_webhook(url=RENDER_URL, drop_pending_updates=True)
+        logger.info(f"Вебхук установлен на: {RENDER_URL}")
 
-    asyncio.create_task(loop_scheduler())
-    
+    # Запускаем фоновые задачи: автопинг и очистку памяти
+    asyncio.create_task(keep_alive())
+    asyncio.create_task(memory_cleaner())
+
+    # Вечный цикл работы основного процесса
     while True:
         await asyncio.sleep(3600)
 
@@ -186,4 +137,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main_async())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот принудительно остановлен.")
+        logger.info("Бот остановлен.")
+
