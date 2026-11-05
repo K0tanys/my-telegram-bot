@@ -19,7 +19,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Твоя точная прямая ссылка на тему "Чат для общения"
-CHAT_LINK = "https://t.me"
+CHAT_LINK = "https://t.me/GameFloid/18600"
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
