@@ -18,8 +18,8 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Твоя точная прямая ссылка на тему "Чат для общения"
-CHAT_LINK = "https://t.me"
+# Полная рабочая ссылка на тему "Чат для общения"
+CHAT_LINK = "https://t.me/GameFloid/18600"
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
@@ -63,17 +63,26 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
     except Exception as err:
         logger.error(f"Не удалось принудительно удалить варн {warn_msg_id}: {err}")
 
-    # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ ДЛЯ АДМИНОВ ---
+    # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ ДЛЯ АДМИНОВ С ССЫЛКОЙ НА ТОПИК НАРУШЕНИЯ ---
     if ADMIN_CHAT_ID:
         try:
             mention = f"[{first_name}](tg://user?id={user_id})"
             tg_username = f" | @{username}" if username else ""
             
+            # Формируем красивую прямую ссылку на конкретный топик нарушения
+            # Для Telegram-ссылок супергрупп убираем "-100" из ID чата
+            clean_chat_id = str(chat_id).replace("-100", "")
+            if topic_id and topic_id != 0:
+                topic_link = f"https://t.me{clean_chat_id}/{topic_id}"
+                topic_display = f"[Перейти в топик {topic_id}]({topic_link})"
+            else:
+                topic_display = "`Основной чат`"
+            
             report_text = (
                 "🚨 **Отчёт о нарушении правил чата**\n\n"
                 f"👤 **Нарушитель:** {mention}{tg_username}\n"
                 f"🆔 **ID пользователя:** `{user_id}`\n"
-                f"🏷 **Топик:** `{topic_id}`\n"
+                f"🏷 **Топик нарушения:** {topic_display}\n"
                 f"⌨️ **Запрещённая команда:** `{command_text}`\n\n"
                 "🗑 *Команда пользователя и предупреждение бота успешно зачищены.*"
             )
@@ -135,7 +144,7 @@ async def moderate_chat(message: Message):
                 await message.delete()
                 logger.info(f"Мгновенно стерта команда пользователя {command_msg_id} в топике {current_topic}")
 
-                # 2. Отправляем предупреждение через HTML
+                # 2. Отправляем предупреждение через HTML с рабочей ссылкой
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
                 warning_text = (
                     f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
@@ -176,7 +185,7 @@ async def handle_webhook(request):
 
         json_data = await request.json()
         
-        # ИСПРАВЛЕНО ДЛЯ AIOGRAM 3.X: преобразуем словарь в объект Update
+        # Преобразуем словарь в объект Update
         telegram_update = Update(**json_data)
         await dp.feed_update(bot, telegram_update)
         
