@@ -21,6 +21,9 @@ dp = Dispatcher()
 # Твоя прямая ссылка на тему "Чат общения"
 CHAT_LINK = "https://t.me"
 
+# Список всех возможных юзернеймов чужого бота для его 100% ликвидации
+TARGET_BOT_USERNAMES = ("blackrussiaassistantbot", "brassgay")
+
 # Список активных топиков, где прямо сейчас тикает режим зачистки
 active_cleanup_topics = set()
 
@@ -51,13 +54,15 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ ЛЮБОГО БОТА В МОМЕНТ ЗАЧИСТКИ ---
+    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ БОТА BR ASSIST ---
     if message.from_user.is_bot:
-        # Если в этой теме сейчас активен режим зачистки — сносим сообщения любого бота
-        if current_topic in active_cleanup_topics:
+        username = message.from_user.username.lower() if message.from_user.username else ""
+        
+        # Проверяем, совпадает ли юзернейм бота с любым из списка БР Ассистента
+        if username in TARGET_BOT_USERNAMES and current_topic in active_cleanup_topics:
             try:
                 await message.delete()
-                logger.info(f"❌ Перехвачен и удален запоздалый ответ бота (ID: {message.from_user.id}) в топике {current_topic}")
+                logger.info(f"❌ Перехвачен и удален ответ бота @{username} в топике {current_topic}")
             except Exception as e:
                 logger.error(f"Не удалось удалить сообщение стороннего бота: {e}")
         return
@@ -82,7 +87,7 @@ async def moderate_chat(message: Message):
                 
                 # 1. Мгновенно удаляем запрещенную команду юзера
                 await message.delete()
-                logger.info(f"🧹 Удалена команда от пользователя {message.from_user.id} в топике {current_topic}")
+                logger.info(f"🧹 Удалена команда от пользователя {message.from_user.id} in topic {current_topic}")
                 
                 # Задержка перед выводом предупреждения (1 секунда)
                 await asyncio.sleep(1.0)
@@ -102,7 +107,7 @@ async def moderate_chat(message: Message):
                 await warn_msg.delete()
                 logger.info(f"Предупреждение удалено, но режим зачистки топика {current_topic} продолжается...")
                 
-                # 4. Ждем ЕЩЕ 15 секунд (суммарно 25 секунд защиты топика) для полной ликвидации тормозящего BR Assist
+                # 4. Ждем ЕЩЕ 15 секунд (суммарно 25 секунд защиты топика) для полной ликвидации чужого бота
                 await asyncio.sleep(15)
                 
                 # Полностью выключаем режим зачистки для этого топика
