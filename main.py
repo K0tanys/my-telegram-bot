@@ -2,24 +2,24 @@ import asyncio
 import logging
 import os
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, Update
 from aiohttp import web, ClientSession
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Загрузка конфигурации из переменных окружения (Render)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# ID темы "Чат для общения", где разрешено использовать команды
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
 ALLOWED_TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
-# URL твоего приложения на Render
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Твоя точная прямая ссылка на тему "Чат для общения"
-CHAT_LINK = "https://t.me/GameFloid/18600"
+CHAT_LINK = "https://t.me"
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
@@ -39,7 +39,52 @@ async def keep_alive():
                 logger.error(f"Ошибка при выполнении автопинга: {e}")
             await asyncio.sleep(35)
 
-# 2. ОБЩИЙ ХЭНДЛЕР ДЛЯ МОДЕРАЦИИ И УВЕДОМЛЕНИЙ
+
+# 3. АБСОЛЮТНО ИЗОЛИРОВАННЫЙ КРАТКОСРОЧНЫЙ ПАТРУЛЬ (Работает строго по числовым ID)
+async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, first_name, username, command_text):
+    # Проверяем чат 4 раза каждые 0.5 секунды для зачистки хвостов
+    for cycle in range(4):
+        await asyncio.sleep(0.5)
+        for next_id in range(cmd_msg_id + 1, cmd_msg_id + 5):
+            # Жесткая изоляция: не трогаем именно этот конкретный варн
+            if next_id == warn_msg_id:
+                continue
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=next_id)
+                logger.info(f"[Патруль топика {topic_id}]: Удален хвост ID {next_id}")
+            except Exception:
+                pass
+
+    # Ждем оставшиеся 8 секунд и удаляем строго свой варн по его ID
+    await asyncio.sleep(8.0)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=warn_msg_id)
+        logger.info(f"Варн ID {warn_msg_id} успешно удален в топике {topic_id}")
+    except Exception as err:
+        logger.error(f"Не удалось принудительно удалить варн {warn_msg_id}: {err}")
+
+    # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ ДЛЯ АДМИНОВ ---
+    if ADMIN_CHAT_ID:
+        try:
+            mention = f"[{first_name}](tg://user?id={user_id})"
+            tg_username = f" | @{username}" if username else ""
+            
+            report_text = (
+                "🚨 **Отчёт о нарушении правил чата**\n\n"
+                f"👤 **Нарушитель:** {mention}{tg_username}\n"
+                f"🆔 **ID пользователя:** `{user_id}`\n"
+                f"🏷 **Топик:** `{topic_id}`\n"
+                f"⌨️ **Запрещённая команда:** `{command_text}`\n\n"
+                "🗑 *Команда пользователя и предупреждение бота успешно зачищены.*"
+            )
+            # Отправляем текстовый отчёт в админ-чат
+            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_text, parse_mode="Markdown")
+            logger.info(f"Отчёт по пользователю {user_id} успешно отправлен администрации.")
+        except Exception as e:
+            logger.error(f"Не удалось отправить отчёт админам: {e}")
+
+
+# 2. ОБЩИЙ ХЕНДЛЕР ДЛЯ МОДЕРАЦИИ И УВЕДОМЛЕНИЙ
 @dp.message()
 async def moderate_chat(message: Message):
     current_topic = message.message_thread_id if message.message_thread_id else 0
@@ -48,16 +93,16 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: ЛЮБОЕ ПРЯМОЕ СООБЩЕНИЕ ОТ СТОРОННЕГО БОТА (ЕСЛИ ВЕБХУК ДОЛЕТИТ) ---
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ ПРЯМОЕ СООБЩЕНИЕ ОТ СТОРОННЕГО БОТА (ЕСЛИ ВДРУГ ДОЛЕТИТ) ---
     is_target_bot = False
-    
+
     if message.from_user:
         if message.from_user.is_bot:
             is_target_bot = True
-        elif message.from_user.username and message.from_user.username.lower() == "brasggay":
+        elif message.from_user.username and message.from_user.username.lower() == "brassgay":
             is_target_bot = True
 
-    if message.via_bot and message.via_bot.username and message.via_bot.username.lower() == "brasggay":
+    if message.via_bot and message.via_bot.username and message.via_bot.username.lower() == "brassgay":
         is_target_bot = True
 
     if is_target_bot:
@@ -75,10 +120,10 @@ async def moderate_chat(message: Message):
         target_commands = (
             "/online", "online", "онлайн",
             "/start", "/help",
-            "/car", "/cont", "/skin", "/craft", "/blackpass", "/biz",
-            "/event", "/cases", "/donat", "/rules", "/drop",
-            "/duel", "/duel top", "/top chat", "/duelon", "/donat_top", "/top",
-            "/calendar", "/vodo", "/farm", "/notif"
+            "/car", "/vcont", "/vskin", "/vcraft", "/vblackpass", "/vbiz",
+            "/vevent", "/vcases", "/vdonat", "/vrules", "/vdrop",
+            "/vduel", "/vduel top", "/vtop chat", "/vduelon", "/vdonat_top", "/vtop",
+            "/vcalendar", "/vvodo", "/vfarm", "/vnotif"
         )
 
         if text.startswith(target_commands):
@@ -88,7 +133,7 @@ async def moderate_chat(message: Message):
 
                 # 1. Мгновенно стираем команду пользователя
                 await message.delete()
-                logger.info(f"Мгновенно стерта команда (ID: {command_msg_id}) в топике {current_topic}")
+                logger.info(f"Мгновенно стерта команда пользователя {command_msg_id} в топике {current_topic}")
 
                 # 2. Отправляем предупреждение через HTML
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
@@ -101,52 +146,46 @@ async def moderate_chat(message: Message):
                 warn_msg_id = warn_msg.message_id
                 logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg_id})")
 
-                # 3. АБСОЛЮТНО ИЗОЛИРОВАННЫЙ КРАТКОСРОЧНЫЙ ПАТРУЛЬ (Работает строго по числовым ID)
-                async def quick_cleanup(c_id, cmd_id, protect_warn_id):
-                    # Проверяем чат 4 раза каждые 0.5 секунды для зачистки хвостов
-                    for cycle in range(4):
-                        await asyncio.sleep(0.5)
-                        for next_id in range(cmd_id + 1, cmd_id + 5):
-                            # Жесткая изоляция: не трогаем именно этот конкретный варн
-                            if next_id == protect_warn_id:
-                                continue
-                            try:
-                                await bot.delete_message(chat_id=c_id, message_id=next_id)
-                                logger.info(f"Патруль топика {current_topic}: Удален хвост ID {next_id}")
-                            except Exception:
-                                pass
-
-                    # Ждем оставшиеся 8 секунд и удаляем строго свой варн по его ID
-                    await asyncio.sleep(8.0)
-                    try:
-                        await bot.delete_message(chat_id=c_id, message_id=protect_warn_id)
-                        logger.info(f"Варн ID {protect_warn_id} успешно удален в топике {current_topic}")
-                    except Exception as err:
-                        logger.error(f"Не удалось принудительно удалить варн {protect_warn_id}: {err}")
-
-                # Передаем только изолированные цифры (ID чата, ID команды, ID варна)
-                asyncio.create_task(quick_cleanup(chat_id, command_msg_id, warn_msg_id))
+                # Передаем изолированные параметры и данные нарушителя в фоновый патруль
+                asyncio.create_task(
+                    quick_cleanup(
+                        chat_id=chat_id,
+                        topic_id=current_topic,
+                        cmd_msg_id=command_msg_id,
+                        warn_msg_id=warn_msg_id,
+                        user_id=message.from_user.id,
+                        first_name=message.from_user.first_name,
+                        username=message.from_user.username,
+                        command_text=message.text
+                    )
+                )
 
             except Exception as e:
                 logger.error(f"Ошибка в процессе изолированной модерации: {e}")
 
-# 3. ОБРАБОТЧИК ВЕБХУКОВ
+
+# 4. ОБРАБОТЧИК ВЕБХУКОВ
 async def handle_webhook(request):
     if request.method == "GET":
-        return web.Response(text="Сервер активен. Функция автопинга работает.", status=200)
-    
+        return web.Response(text="Сервер активен, функция автопинга работает.", status=200)
+
     try:
         if not request.can_read_body:
             logger.warning("Получен пустой POST-запрос (возможно, пинг от Render)")
             return web.Response(text="Empty body", status=400)
-            
+
         json_data = await request.json()
-        await dp.feed_raw_update(bot, json_data)
-        return web.Response(text="ok", status=200)
         
+        # ИСПРАВЛЕНО ДЛЯ AIOGRAM 3.X: преобразуем словарь в объект Update
+        telegram_update = Update(**json_data)
+        await dp.feed_update(bot, telegram_update)
+        
+        return web.Response(text="ok", status=200)
+
     except Exception as e:
         logger.error(f"Ошибка вебхука: {e}")
         return web.Response(text="error", status=400)
+
 
 async def main_async():
     app = web.Application()
@@ -168,6 +207,7 @@ async def main_async():
 
     while True:
         await asyncio.sleep(3600)
+
 
 if __name__ == "__main__":
     try:
