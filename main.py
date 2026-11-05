@@ -48,7 +48,7 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: ЛЮБОЕ ПРЯМОЕ СООБЩЕНИЕ ОТ СТОРОННЕГО БОТА (ЕСЛИ ДОЛЕТИТ ВЕБХУК) ---
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ ПРЯМОЕ СООБЩЕНИЕ ОТ СТОРОННЕГО БОТА (ЕСЛИ ВЕБХУК ДОЛЕТИТ) ---
     is_target_bot = False
     
     if message.from_user:
@@ -63,12 +63,12 @@ async def moderate_chat(message: Message):
     if is_target_bot:
         try:
             await message.delete()
-            logger.info(f"Мгновенно удалено прямое сообщение BR Assistant в топике {current_topic}")
+            logger.info(f"Мгновенно удалено входящее сообщение BR Assistant в топике {current_topic}")
         except Exception:
             pass
         return
 
-    # --- СЦЕНАРИЙ 2: КОМАНДА ОТ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ ---
+    # --- СЦЕНАРИЙ 2: МГНОВЕННОЕ УДАЛЕНИЕ ЗАПРЕЩЕННОЙ КОМАНДЫ ЮЗЕРА ---
     if message.text:
         text = message.text.lower().strip()
 
@@ -86,11 +86,11 @@ async def moderate_chat(message: Message):
                 command_msg_id = message.message_id
                 chat_id = message.chat.id
 
-                # 1. Мгновенно (за 0.01 сек) удаляем запрещенную команду юзера
+                # 1. Сверхбыстрое удаление команды пользователя, чтобы чужой бот не успел считать вебхук
                 await message.delete()
-                logger.info(f"Мгновенно удалена команда (ID: {command_msg_id}) в топике {current_topic}")
+                logger.info(f"Мгновенно стерта запрещенная команда (ID: {command_msg_id}) в топике {current_topic}")
 
-                # 2. Мгновенно отправляем предупреждение через HTML
+                # 2. Отправляем предупреждение через HTML
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
                 warning_text = (
                     f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
@@ -98,38 +98,34 @@ async def moderate_chat(message: Message):
                 )
 
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
-                warn_msg_id = warn_msg.message_id
-                logger.info(f"Предупреждение отправлено (ID варна: {warn_msg_id})")
+                logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg.message_id})")
 
-                # 3. ЦИКЛИЧЕСКИЙ МНОГОУРОВНЕВЫЙ ПАТРУЛЬ (БЬЕМ ПО ОДНИМ И ТЕМ ЖЕ ID ПОВТОРНО)
-                async def многократный_патруль(chat_id, cmd_id, protect_id, warn_obj):
-                    # Делаем 12 циклов проверки каждые 0.5 секунды (всего 6 секунд активной зачистки)
-                    for cycle in range(12):
-                        # Проверяем диапазон до 10 сообщений вперед
-                        for next_id in range(cmd_id + 1, cmd_id + 11):
-                            if next_id == protect_id:
+                # 3. КРАТКОСРОЧНЫЙ ПАТРУЛЬ НА СЛУЧАЙ ХВОСТОВ (Очистка +4 ID вперед за 2 секунды)
+                async def quick_cleanup(chat_id, cmd_id, warn_obj):
+                    # Проверяем чат 4 раза каждые 0.5 секунды
+                    for cycle in range(4):
+                        await asyncio.sleep(0.5)
+                        for next_id in range(cmd_id + 1, cmd_id + 5):
+                            if next_id == warn_obj.message_id:
                                 continue
                             try:
-                                # Удаляем повторно, даже если на прошлом цикле этот ID уже "удалялся"
                                 await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                                logger.info(f"Цикл {cycle+1}: Повторно уничтожен/подавлен ID {next_id}")
+                                logger.info(f"Патруль (шаг {cycle+1}): Удален проскочивший ID {next_id}")
                             except Exception:
                                 pass
-                        
-                        await asyncio.sleep(0.5)
 
-                    # Ждем оставшиеся 4 секунды до общей длительности варна в 10 секунд
-                    await asyncio.sleep(4.0)
+                    # Ждем еще 8 секунд (чтобы суммарно варн провисел 10 секунд) и удаляем его
+                    await asyncio.sleep(8.0)
                     try:
                         await warn_obj.delete()
                         logger.info("Временное предупреждение успешно удалено по таймеру.")
                     except Exception as err:
                         logger.error(f"Не удалось удалить варн: {err}")
 
-                asyncio.create_task(многократный_патруль(chat_id, command_msg_id, warn_msg_id, warn_msg))
+                asyncio.create_task(quick_cleanup(chat_id, command_msg_id, warn_msg))
 
             except Exception as e:
-                logger.error(f"Ошибка в процессе модерации: {e}")
+                logger.error(f"Ошибка в процессе быстрой модерации: {e}")
 
 # 3. ОБРАБОТЧИК ВЕБХУКОВ
 async def handle_webhook(request):
