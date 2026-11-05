@@ -155,14 +155,18 @@ async def moderate_chat(message: Message):
     if message.text:
         text = message.text.lower().strip()
 
+                # Полный список всех команд со скриншотов
         target_commands = (
             "/online", "online", "онлайн",
-            "/start", "/help",
-            "/car", "/vcont", "/vskin", "/vcraft", "/vblackpass", "/vbiz",
-            "/vevent", "/vcases", "/vdonat", "/vrules", "/vdrop",
-            "/vduel", "/vduel top", "/vtop chat", "/vduelon", "/vdonat_top", "/vtop",
-            "/vcalendar", "/vvodo", "/vfarm", "/vnotif"
+            "/start", "start", "/help", "help",
+            "/car", "car", "/cont", "cont", "/skin", "skin", "/craft", "craft", 
+            "/blackpass", "blackpass", "/biz", "biz", "/event", "event", 
+            "/cases", "cases", "/donat", "donat", "/rules", "rules", "/drop", "drop",
+            "/duel", "duel", "/duel_top", "duel_top", "/top_chat", "top_chat", 
+            "/duelon", "duelon", "/donat_top", "donat_top", "/top", "top",
+            "/calendar", "calendar", "/vodo", "vodo", "/farm", "farm", "/notif", "notif"
         )
+
 
         if text.startswith(target_commands):
             try:
