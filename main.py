@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup
 from aiohttp import web, ClientSession
 
 # Настройка логирования
@@ -68,7 +68,7 @@ async def moderate_chat(message: Message):
             pass
         return
 
-    # --- СЦЕНАРИЙ 2: ПЕРЕХВАТ И ИНВЕРТИРОВАННАЯ ОЧИСТКА КОМАНДЫ ЮЗЕРА ---
+    # --- СЦЕНАРИЙ 2: ПЕРЕХВАТ И ИНВЕРТИРОВАННАЯ ОЧИСТКА С УНИЧТОЖЕНИЕМ КЛАВИАТУРЫ ---
     if message.text:
         text = message.text.lower().strip()
 
@@ -88,31 +88,45 @@ async def moderate_chat(message: Message):
                 user_id = message.from_user.id
                 user_first_name = message.from_user.first_name
 
-                logger.info(f"Обнаружена команда (ID: {command_msg_id}) в топике {current_topic}. Запуск инвертированной очистки...")
+                logger.info(f"Обнаружена команда (ID: {command_msg_id}) в топике {current_topic}. Запуск дожима кнопок...")
 
-                # Запускаем асинхронную задачу, которая сначала удалит ответ BR Assistant, а затем команду юзера
+                # Запускаем асинхронную задачу дожима
                 async def smart_inverted_cleanup(chat_id, cmd_id, u_id, u_name):
-                    # Проверяем появление ответа в течение 3 секунд мелкими шагами (очень агрессивно)
-                    for cycle in range(6):
-                        await asyncio.sleep(0.5)
-                        
-                        # Проверяем строго следующие ID сообщений, которые создаются поверх команды
-                        for next_id in range(cmd_id + 1, cmd_id + 6):
+                    # Даем BR Assistant 0.3 секунды гарантированно выплюнуть ответ на команду
+                    await asyncio.sleep(0.3)
+
+                    # Проверяем появление ответа в течение 4 секунд (8 циклов по 0.5 сек)
+                    for cycle in range(8):
+                        # Прочесываем ID сообщений вперед
+                        for next_id in range(cmd_id + 1, cmd_id + 11):
                             try:
-                                # Удаляем ответ чужого бота
-                                await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                                logger.info(f"Шаг {cycle+1}: Успешно удален ответ BR Assistant (ID: {next_id})")
+                                # ХИТРОСТЬ: Принудительно очищаем инлайн-кнопки (схлопываем меню подписки)
+                                await bot.edit_message_reply_markup(
+                                    chat_id=chat_id, 
+                                    message_id=next_id, 
+                                    reply_markup=None
+                                )
+                                logger.info(f"Цикл {cycle+1}: Схлопнуты инлайн-кнопки у сообщения ID {next_id}")
                             except Exception:
                                 pass
 
-                    # Когда чужой бот стерт, удаляем само исходное сообщение (команду пользователя)
+                            try:
+                                # Сразу же удаляем само очищенное сообщение
+                                await bot.delete_message(chat_id=chat_id, message_id=next_id)
+                                logger.info(f"Цикл {cycle+1}: Точечно удален очищенный текст бота (ID: {next_id})")
+                            except Exception:
+                                pass
+                        
+                        await asyncio.sleep(0.5)
+
+                    # Когда чужой бот полностью обезврежен, удаляем исходную команду пользователя
                     try:
                         await bot.delete_message(chat_id=chat_id, message_id=cmd_id)
-                        logger.info(f"Исходная команда юзера (ID: {cmd_id}) успешно удалена.")
+                        logger.info(f"Исходная команда юзера (ID: {cmd_id}) удалена.")
                     except Exception as e:
                         logger.warning(f"Не удалось удалить команду юзера: {e}")
 
-                    # Только ТЕПЕРЬ, когда всё кристально чисто, отправляем варн
+                    # Отправляем чистое предупреждение
                     try:
                         user_html_mention = f'<a href="tg://user?id={u_id}">{u_name}</a>'
                         warning_text = (
@@ -128,7 +142,7 @@ async def moderate_chat(message: Message):
                         )
                         logger.info(f"Предупреждение успешно отправлено в финале (ID: {warn_msg.message_id})")
                         
-                        # Ждем 10 секунд видимости чистого варна и удаляем его
+                        # Варн висит 10 секунд и удаляется
                         await asyncio.sleep(10.0)
                         await warn_msg.delete()
                         logger.info("Временное предупреждение успешно удалено по таймеру.")
