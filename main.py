@@ -18,8 +18,8 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Точная, полная рабочая ссылка для нарушителей на топик "Чат для общения"
-CHAT_LINK = "https://t.me"
+# ИСПРАВЛЕНО ЖЕСТКО: Полная правильная ссылка для нарушителей на топик "Чат для общения"
+CHAT_LINK = "https://t.me/GameFloid/18600"
 
 # Полный словарь тем со всех твоих скриншотов
 TOPIC_NAMES = {
@@ -35,7 +35,7 @@ TOPIC_NAMES = {
     21658: "Прочие услуги",
     21660: "Правила группы",
     22032: "Реклама семьи",
-    22422: "Безопасность сделок | Anti-Скам",
+    22422: "Безопасность сделок | Анти-Скам",
     22436: "Жалобы на нарушителей",
     25114: "Новости",
     37914: "Промокоды"
@@ -72,9 +72,9 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
             # Находим имя темы из словаря
             name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
             
-            # Точная сборка ссылки для админа с полным адресом группы GameFloid
+            # ИСПРАВЛЕНО ЖЕСТКО: Полная правильная ссылка для админов по твоему образцу
             if topic_id and topic_id != 0:
-                full_url = f"https://t.me{topic_id}"
+                full_url = f"https://t.me/GameFloid/{topic_id}"
                 topic_display = f"[{name_of_topic}]({full_url})"
             else:
                 topic_display = "`Основной чат`"
