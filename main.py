@@ -88,15 +88,15 @@ async def handle_bot_reply(message: Message):
             except Exception as e:
                 logger.error(f"Не удалось удалить ответ бота: {e}")
 
-# 4. ОБРАБОТЧИК ВЕБХУКОВ (Сюда прилетают пинги и апдейты от Telegram)
+# 4. ОБРАБОТЧИК ВЕБХУКОВ (Исправлен на асинхронный с await)
 async def handle_webhook(request):
     if request.method == "GET":
         return web.Response(text="Сервер активен. Функция автопинга работает.", status=200)
     
     try:
         json_data = await request.json()
-        update = dp.feed_raw_update(bot, json_data)
-        await dp.feed_update(bot, update)
+        # Теперь здесь стоит await, ошибки "coroutine object has no attribute bot" больше не будет
+        await dp.feed_raw_update(bot, json_data)
         return web.Response(text="ok", status=200)
     except Exception as e:
         logger.error(f"Ошибка вебхука: {e}")
@@ -125,11 +125,10 @@ async def main_async():
         await bot.set_webhook(url=RENDER_URL, drop_pending_updates=True)
         logger.info(f"Вебхук установлен на: {RENDER_URL}")
 
-    # Запускаем фоновые задачи: автопинг и очистку памяти
+    # Запускаем фоновые задачи
     asyncio.create_task(keep_alive())
     asyncio.create_task(memory_cleaner())
 
-    # Вечный цикл работы основного процесса
     while True:
         await asyncio.sleep(3600)
 
@@ -138,4 +137,3 @@ if __name__ == "__main__":
         asyncio.run(main_async())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
-
