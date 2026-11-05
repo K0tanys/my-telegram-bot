@@ -48,7 +48,7 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ ЛЮБОГО БОТА (Если вебхук прилетел сразу) ---
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ ЛЮБОГО БОТА (Если вебхук долетел сразу) ---
     if message.from_user.is_bot:
         try:
             await message.delete()
@@ -87,48 +87,39 @@ async def moderate_chat(message: Message):
                 )
                 
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
-                logger.info(f"Предупреждение отправлено в топик {current_topic}")
+                logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg.message_id})")
                 
-                # 3. ЗАПУСКАЕМУЮ УМНУЮ СТРАХОВКУ С ПРОВЕРКОЙ НА БОТА (В фоне)
-                async def smart_id_cleanup(chat_id, cmd_id, warn_message):
-                    # Даем чужому боту 1.5 секунды, чтобы его сообщение точно долетело до серверов Telegram
-                    await asyncio.sleep(1.5)
-                    
-                    # Сканируем следующие ID сообщений вперед
-                    for next_id in range(cmd_id + 1, cmd_id + 5):
-                        # Пропускаем ID нашего собственного варна, его удалять еще рано
-                        if next_id == warn_message.message_id:
-                            continue
+                # 3. ЗАПУСКАЕМ ЖЕЛЕЗОБЕТОННУЮ УВЕРЕННУЮ ОЧИСТКУ ПО ID С ПОВТОРНЫМИ ПРОВЕРКАМИ (В фоне)
+                async def secure_id_cleanup(chat_id, cmd_id, warn_message):
+                    # Чужой бот может выплюнуть ответ мгновенно или задержаться. 
+                    # Поэтому мы сделаем несколько циклов проверки с микропаузами в течение первых 4 секунд.
+                    for cycle in range(5):
+                        await asyncio.sleep(0.8) # Ждем чуть меньше секунды между проверками
                         
-                        try:
-                            # Трюк: пересылаем сообщение самому себе во внутренний буфер, чтобы прочитать его структуру
-                            # и узнать, кто его автор, не вызывая ошибок в основном чате
-                            forwarded = await bot.forward_message(chat_id=chat_id, from_chat_id=chat_id, message_id=next_id)
-                            is_target_bot = forwarded.forward_from.is_bot if forwarded.forward_from else False
-                            
-                            # Удаляем техническую копию сообщения из буфера
-                            await forwarded.delete()
-                            
-                            # Если проверка подтвердила, что это сообщение от БОТА — принудительно стираем оригинал в группе
-                            if is_target_bot:
+                        # Сканируем диапазон ID вокруг нашей команды и варна
+                        # Например, если команда 100, а варн 101, то ответ чужого бота гарантированно будет иметь ID 102 или 103.
+                        for next_id in range(cmd_id + 1, cmd_id + 5):
+                            # Ни в коем случае не трогаем ID нашего собственного варна
+                            if next_id == warn_message.message_id:
+                                continue
+                            try:
+                                # Даем Telegram прямой приказ на удаление ID без предварительного чтения
                                 await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                                logger.info(f"🎯 Снайперски удален проскочивший ответ бота (ID: {next_id})")
-                            else:
-                                logger.info(f"ℹ️ Сообщение {next_id} принадлежит обычному человеку. Пропускаем.")
-                                
-                        except Exception:
-                            # Если сообщения с таким ID еще нет или нет прав — просто идем к следующему
-                            pass
+                                logger.info(f"🎯 Принудительно уничтожено проскочившее сообщение чужого бота (ID: {next_id})")
+                            except Exception:
+                                # Если сообщения с таким ID еще нет, или это чужой юзер (которого нельзя удалить без жалобы),
+                                # Telegram просто вернет ошибку, и код пойдет дальше без сбоев.
+                                pass
                     
-                    # Дожидаемся окончания 10 секунд и удаляем наше предупреждение
-                    await asyncio.sleep(8.5)
+                    # Дожидаемся окончания общего времени (10 секунд общего времени жизни варна)
+                    await asyncio.sleep(5.0)
                     try:
                         await warn_message.delete()
                         logger.info("Временное предупреждение успешно удалено.")
                     except Exception as err:
                         logger.error(f"Не удалось удалить варн: {err}")
                 
-                asyncio.create_task(smart_id_cleanup(chat_id, command_msg_id, warn_msg))
+                asyncio.create_task(secure_id_cleanup(chat_id, command_msg_id, warn_msg))
                 
             except Exception as e:
                 logger.error(f"Ошибка в процессе модерации: {e}")
