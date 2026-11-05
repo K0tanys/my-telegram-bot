@@ -18,8 +18,8 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Ссылка для нарушителей на топик "Чат для общения"
-CHAT_LINK = "https://t.me"
+# Точная рабочая ссылка для нарушителей на топик "Чат для общения"
+CHAT_LINK = "https://t.me/GameFloid/18600"
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
@@ -62,16 +62,16 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
     except Exception as err:
         logger.error(f"Не удалось принудительно удалить варн {warn_msg_id}: {err}")
 
-    # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ С ИСПРАВЛЕННОЙ ССЫЛКОЙ НА ТЕМУ ДЛЯ АДМИНОВ ---
+    # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ С ТОЧНОЙ ССЫЛКОЙ НА ТЕМУ ДЛЯ АДМИНОВ ---
     if ADMIN_CHAT_ID:
         try:
             mention = f"[{first_name}](tg://user?id={user_id})"
             tg_username = f" | @{username}" if username else ""
             
-            # Настраиваем прямую красивую ссылку на тему публичной группы
+            # Собираем правильную публичную ссылку на тему через название группы GameFloid
             if topic_id and topic_id != 0:
-                topic_link = f"https://t.me{topic_id}"
-                topic_display = f"[Перейти в тему {topic_id}]({topic_link})"
+                topic_link = f"https://t.me/GameFloid/{topic_id}"
+                topic_display = f"[{topic_id}]({topic_link})"
             else:
                 topic_display = "`Основной чат`"
             
@@ -140,7 +140,7 @@ async def moderate_chat(message: Message):
                 await message.delete()
                 logger.info(f"Мгновенно стерта команда пользователя {command_msg_id} в теме {current_topic}")
 
-                # 2. Отправляем предупреждение через HTML с точной ссылкой на нужный топик
+                # 2. Отправляем предупреждение через HTML с точной рабочей ссылкой
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
                 warning_text = (
                     f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
@@ -151,7 +151,7 @@ async def moderate_chat(message: Message):
                 warn_msg_id = warn_msg.message_id
                 logger.info(f"Предупреждение отправлено в тему {current_topic} (ID варна: {warn_msg_id})")
 
-                # Передаем изолированные параметры и данные нарушителя в фоновый патруль
+                # Передаем параметры и данные нарушителя в фоновый патруль
                 asyncio.create_task(
                     quick_cleanup(
                         chat_id=chat_id,
