@@ -19,7 +19,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Твоя точная прямая ссылка на тему "Чат общения"
-CHAT_LINK = "https://t.me/GameFloid/18600"
+CHAT_LINK = "https://t.me"
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
@@ -101,35 +101,35 @@ async def moderate_chat(message: Message):
                 )
 
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
-                logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg.message_id})")
+                warn_msg_id = warn_msg.message_id
+                logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg_id})")
 
-                # 3. УЛУЧШЕННАЯ МГНОВЕННАЯ ОЧИСТКА ВПЕРЕД
-                async def secure_id_cleanup(chat_id, cmd_id, warn_msg):
-                    # Проверяем чат 15 раз подряд с микро-интервалами, начиная МГНОВЕННО
-                    for cycle in range(15):
-                        # Расширили диапазон сканирования до 15 сообщений вперед
+                # 3. МЕТОДИЧНАЯ ОЧИСТКА В ТЕЧЕНИЕ 10 СЕКУНД
+                async def secure_id_cleanup(chat_id, cmd_id, warn_msg_to_delete, protect_id):
+                    # Делаем 10 циклов опроса, по 1 секунде каждый
+                    for cycle in range(10):
+                        # Проверяем диапазон до 15 ID вперед от отправленной команды
                         for next_id in range(cmd_id + 1, cmd_id + 16):
-                            # Свой собственный варн не трогаем
-                            if next_id == warn_msg.message_id:
+                            # Жестко защищаем собственный варн по подтвержденному ID
+                            if next_id == protect_id:
                                 continue
                             try:
                                 await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                                logger.info(f"В цикле {cycle+1} принудительно удален ответ бота (ID: {next_id})")
+                                logger.info(f"В цикле {cycle+1} принудительно удален проскочивший ответ бота (ID: {next_id})")
                             except Exception:
                                 pass
                         
-                        # Небольшая пауза между циклами для ожидания генерации ответа юзерботом
-                        await asyncio.sleep(0.5)
+                        # Ждем ровно секунду перед следующим сканированием чата
+                        await asyncio.sleep(1.0)
 
-                    # Ждем оставшееся время до 10 секунд общей видимости варна и удаляем его
-                    await asyncio.sleep(2.5)
+                    # После 10 секунд сканирования удаляем варн
                     try:
-                        await warn_msg.delete()
+                        await warn_msg_to_delete.delete()
                         logger.info("Временное предупреждение (10 сек) успешно удалено.")
                     except Exception as err:
                         logger.error(f"Не удалось удалить варн: {err}")
 
-                asyncio.create_task(secure_id_cleanup(chat_id, command_msg_id, warn_msg))
+                asyncio.create_task(secure_id_cleanup(chat_id, command_msg_id, warn_msg, warn_msg_id))
 
             except Exception as e:
                 logger.error(f"Ошибка в процессе модерации: {e}")
