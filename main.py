@@ -19,7 +19,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Точная, полная рабочая ссылка для нарушителей на топик "Чат для общения"
-CHAT_LINK = "https://t.me/GameFloid/18600"
+CHAT_LINK = "https://t.me"
 
 # Полный словарь тем со всех твоих скриншотов
 TOPIC_NAMES = {
@@ -59,30 +59,11 @@ async def keep_alive():
                 logger.error(f"Ошибка при выполнении автопинга: {e}")
             await asyncio.sleep(35)
 
-# 3. АБСОЛЮТНО ИЗОЛИРОВАННЫЙ КРАТКОСРОЧНЫЙ ПАТРУЛЬ (Работает строго по числовым ID)
+# 3. АБСОЛЮТНО ИЗОЛИРОВАННЫЙ КРАТКОСРОЧНЫЙ ПАТРУЛЬ
 async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, first_name, username, command_text):
-    # Проверяем чат 4 раза каждые 0.5 секунды для зачистки хвостов
-    for cycle in range(4):
-        await asyncio.sleep(0.5)
-        for next_id in range(cmd_msg_id + 1, cmd_msg_id + 5):
-            # Жесткая изоляция варна
-            if next_id == warn_msg_id:
-                continue
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                logger.info(f"[Патруль темы {topic_id}]: Удален хвост ID {next_id}")
-            except Exception:
-                pass
-
-    # Ждем оставшиеся 8 секунд и удаляем строго свой варн по его ID
-    await asyncio.sleep(8.0)
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=warn_msg_id)
-        logger.info(f"Варн ID {warn_msg_id} успешно удален в теме {topic_id}")
-    except Exception as err:
-        logger.error(f"Не удалось принудительно удалить варн {warn_msg_id}: {err}")
-
     # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ С НАЗВАНИЕМ ТЕМЫ ДЛЯ АДМИНОВ ---
+    # Отправляем админам сразу (через 0.5 сек), чтобы не ждать удаления варна на клиенте
+    await asyncio.sleep(0.5)
     if ADMIN_CHAT_ID:
         try:
             mention = f"[{first_name}](tg://user?id={user_id})"
@@ -93,7 +74,7 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
             
             # Точная сборка ссылки для админа с полным адресом группы GameFloid
             if topic_id and topic_id != 0:
-                full_url = f"https://t.me/GameFloid/{topic_id}"
+                full_url = f"https://t.me{topic_id}"
                 topic_display = f"[{name_of_topic}]({full_url})"
             else:
                 topic_display = "`Основной чат`"
@@ -106,11 +87,34 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
                 f"⌨️ **Запрещённая команда:** `{command_text}`\n\n"
                 "🗑 *Команда пользователя и предупреждение бота успешно зачищены.*"
             )
-            # Отправляем текстовый отчёт в админ-чат через чистый Markdown
             await bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_text, parse_mode="Markdown")
             logger.info(f"Отчёт по пользователю {user_id} успешно отправлен администрации.")
         except Exception as e:
             logger.error(f"Не удалось отправить отчёт админам: {e}")
+
+    # Патрулируем хвосты в фоне, полностью изолировав ошибки
+    try:
+        for cycle in range(4):
+            await asyncio.sleep(0.5)
+            for next_id in range(cmd_msg_id + 1, cmd_msg_id + 5):
+                if next_id == warn_msg_id:
+                    continue
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=next_id)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"Ошибка патруля хвостов: {e}")
+
+    # Ждем оставшееся время (еще 5.5 секунд), чтобы пользователь успел прочесть варн
+    await asyncio.sleep(5.5)
+    
+    # ЖЕСТКОЕ ПРИНУДИТЕЛЬНОЕ УДАЛЕНИЕ СОБСТВЕННОГО ВАРНА
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=warn_msg_id)
+        logger.info(f"Варн ID {warn_msg_id} успешно удален принудительно.")
+    except Exception as err:
+        logger.error(f"Не удалось принудительно удалить варн {warn_msg_id}: {err}")
 
 # 2. ОБЩИЙ ХЕНДЛЕР ДЛЯ МОДЕРАЦИИ И УВЕДОМЛЕНИЙ
 @dp.message()
@@ -121,7 +125,7 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: ЛЮБОЕ ПРЯМОЕ СООБЩЕНИЕ ОТ СТОРОННЕГО БОТА (ЕСЛИ ВДРУГ ДОЛЕТИТ) ---
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ ПРЯМОЕ СООБЩЕНИЕ ОТ СТОРОННЕГО БОТА ---
     is_target_bot = False
 
     if message.from_user:
@@ -170,7 +174,6 @@ async def moderate_chat(message: Message):
                     f"можно строго в теме **[Чат для общения]({CHAT_LINK})**!"
                 )
 
-                # Отправляем варн нарушителю через Markdown (так же, как и отчет админам)
                 warn_msg = await message.answer(warning_text, parse_mode="Markdown", disable_web_page_preview=True)
                 warn_msg_id = warn_msg.message_id
                 logger.info(f"Предупреждение отправлено в тему {current_topic} (ID варна: {warn_msg_id})")
