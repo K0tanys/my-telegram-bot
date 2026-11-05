@@ -23,9 +23,12 @@ TARGET_BOT_USERNAME = "blackrussiaassistantbot"
 TARGET_BOT_NAME_PART = "assist"
 
 # Твоя прямая ссылка на тему "Чат общения"
-CHAT_LINK = "https://t.me"
+CHAT_LINK = "https://t.me/GameFloid/18600"
 
-# 1. ЗАЗАЩИТА ОТ СНА (ПИНГЕР)
+# Список активных топиков, где прямо сейчас тикает 10-секундный режим зачистки
+active_cleanup_topics = set()
+
+# 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
     if not RENDER_URL:
         logger.warning("RENDER_EXTERNAL_URL не найдена. Автопинг отключен.")
@@ -57,13 +60,13 @@ async def moderate_chat(message: Message):
         username = message.from_user.username.lower() if message.from_user.username else ""
         first_name = message.from_user.first_name.lower() if message.from_user.first_name else ""
         
-        if TARGET_BOT_USERNAME in username or TARGET_BOT_NAME_PART in first_name:
+        # Если это BR Assistant И в данном топике сейчас включен режим усиленной зачистки
+        if (TARGET_BOT_USERNAME in username or TARGET_BOT_NAME_PART in first_name) and current_topic in active_cleanup_topics:
             try:
-                await asyncio.sleep(0.1)
                 await message.delete()
-                logger.info(f"❌ Удалено сообщение стороннего бота в топике {current_topic}")
+                logger.info(f"❌ Перехвачен и удален запоздалый ответ бота BR Assist в топике {current_topic}")
             except Exception as e:
-                logger.error(f"Не удалось удалить сообщение стороннего бота: {e}")
+                logger.error(f"Не удалось удалить запоздалое сообщение стороннего бота: {e}")
         return
 
     # --- СЦЕНАРИЙ 2: КОМАНДА ОТ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ ---
@@ -81,9 +84,12 @@ async def moderate_chat(message: Message):
         
         if text.startswith(target_commands):
             try:
+                # Включаем режим усиленной зачистки для этого топика
+                active_cleanup_topics.add(current_topic)
+                
                 # 1. Мгновенно удаляем запрещенную команду юзера
                 await message.delete()
-                logger.info(f"🧹 Удалена команда от пользователя {message.from_user.id}")
+                logger.info(f"🧹 Удалена команда от пользователя {message.from_user.id} в топике {current_topic}")
                 
                 # Задержка перед выводом предупреждения (1 секунда)
                 await asyncio.sleep(1.0)
@@ -98,13 +104,18 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="Markdown", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic}")
                 
-                # 3. Ждем ровно 10 секунд и удаляем наше предупреждение
+                # 3. Ждем ровно 10 секунд. Если за эти 10 секунд прилетит ответ от BR Assist, 
+                # верхняя часть кода (Сценарий 1) его мгновенно поймает и сотрет.
                 await asyncio.sleep(10)
+                
+                # Выключаем режим зачистки для топика и удаляем предупреждение
                 await warn_msg.delete()
-                logger.info("Временное предупреждение успешно удалено.")
+                active_cleanup_topics.discard(current_topic)
+                logger.info(f"Режим зачистки топика {current_topic} завершен. Предупреждение удалено.")
                 
             except Exception as e:
-                logger.error(f"Ошибка в процессе отправки/удаления предупреждения: {e}")
+                logger.error(f"Ошибка в процессе модерации: {e}")
+                active_cleanup_topics.discard(current_topic)
 
 # 3. ОБРАБОТЧИК ВЕБХУКОВ
 async def handle_webhook(request):
