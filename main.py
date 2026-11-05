@@ -10,20 +10,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# ID темы "Чат общения", где разрешено использовать команды (из настроек Render: 18600)
-ALLOWED_TOPIC_ID = int(os.getenv("TOPIC_ID", 18600))
+# ID темы "Чат общения", где разрешено использовать команды
+ALLOWED_TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
 # URL твоего приложения на Render
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Правильная прямая ссылка на тему "Чат для общения"
-CHAT_LINK = f"https://t.me{ALLOWED_TOPIC_ID}"
-
-# Юзернейм или ID юзербота BR Assistant для блокировки в других топиках
-BR_ASSISTANT_USERNAMES = ("brasggay", "blackrussiaassistantbot")
-
+# Твоя точная прямая ссылка на тему "Чат общения"
+CHAT_LINK = "https://t.me/GameFloid/18600"
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
@@ -43,7 +39,6 @@ async def keep_alive():
                 logger.error(f"Ошибка при выполнении автопинга: {e}")
             await asyncio.sleep(35)
 
-
 # 2. ОБЩИЙ ХЭНДЛЕР ДЛЯ МОДЕРАЦИИ И УВЕДОМЛЕНИЙ
 @dp.message()
 async def moderate_chat(message: Message):
@@ -53,14 +48,25 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # Получаем юзернейм отправителя в нижнем регистре для проверок
-    username = message.from_user.username.lower() if message.from_user.username else ""
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ БОТА ИЛИ ЮЗЕРБОТА BR ASSISTANT ---
+    is_target_bot = False
+    
+    if message.from_user:
+        # Проверяем стандартный флаг бота
+        if message.from_user.is_bot:
+            is_target_bot = True
+        # Проверяем юзернейм юзербота BR Assistant (без учета регистра)
+        elif message.from_user.username and message.from_user.username.lower() == "brasggay":
+            is_target_bot = True
 
-    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ ЛЮБОГО БОТА ИЛИ ЮЗЕРБОТА BR ASSISTANT ---
-    if message.from_user.is_bot or username in BR_ASSISTANT_USERNAMES:
+    # Дополнительная проверка на случай, если сообщение отправлено через Web App / привязанного бота
+    if message.via_bot and message.via_bot.username and message.via_bot.username.lower() == "brasggay":
+        is_target_bot = True
+
+    if is_target_bot:
         try:
             await message.delete()
-            logger.info(f"Мгновенно удален ответ бота/юзербота {username} в топике {current_topic}")
+            logger.info(f"Мгновенно удалено сообщение стороннего бота/юзербота в топике {current_topic}")
         except Exception:
             pass
         return
@@ -87,11 +93,11 @@ async def moderate_chat(message: Message):
                 await message.delete()
                 logger.info(f"Удалена команда (ID: {command_msg_id}) в топике {current_topic}")
 
-                # 2. Отправляем предупреждение через HTML с правильной ссылкой
+                # 2. Отправляем предупреждение через HTML
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
                 warning_text = (
                     f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
-                    f"можно строго в теме <b><a href='{CHAT_LINK}'>Чат для общения</a></b>!"
+                    f"можно строго в теме <b><a href='{CHAT_LINK}'>Чат общения</a></b>!"
                 )
 
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
@@ -103,8 +109,10 @@ async def moderate_chat(message: Message):
                     for cycle in range(6):
                         await asyncio.sleep(1.0)
 
-                        # Проверяем до 10 сообщений вперед, чтобы накрыть ответ чужого бота
+                        # Расширили диапазон сканирования: проверяем до 10 сообщений вперед,
+                        # чтобы гарантированно накрыть кнопочный ответ чужого бота
                         for next_id in range(cmd_id + 1, cmd_id + 11):
+                            # Свой собственный варн не трогаем
                             if next_id == warn_msg.message_id:
                                 continue
                             try:
@@ -126,23 +134,23 @@ async def moderate_chat(message: Message):
             except Exception as e:
                 logger.error(f"Ошибка в процессе модерации: {e}")
 
-
 # 3. ОБРАБОТЧИК ВЕБХУКОВ
 async def handle_webhook(request):
     if request.method == "GET":
         return web.Response(text="Сервер активен. Функция автопинга работает.", status=200)
-
+    
     try:
         if not request.can_read_body:
+            logger.warning("Получен пустой POST-запрос (возможно, пинг от Render)")
             return web.Response(text="Empty body", status=400)
-
+            
         json_data = await request.json()
         await dp.feed_raw_update(bot, json_data)
         return web.Response(text="ok", status=200)
+        
     except Exception as e:
         logger.error(f"Ошибка вебхука: {e}")
         return web.Response(text="error", status=400)
-
 
 async def main_async():
     app = web.Application()
@@ -164,7 +172,6 @@ async def main_async():
 
     while True:
         await asyncio.sleep(3600)
-
 
 if __name__ == "__main__":
     try:
