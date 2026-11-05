@@ -18,7 +18,7 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Точная рабочая ссылка для нарушителей на топик "Чат для общения"
+# Точная и полная рабочая ссылка для нарушителей на топик "Чат для общения"
 CHAT_LINK = "https://t.me"
 
 # Полный словарь тем со всех твоих скриншотов
@@ -92,9 +92,9 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
             # Находим имя темы из словаря
             name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
             
-            # Безопасное формирование ссылки на публичную тему через HTML
+            # Точное формирование ссылки по твоему образцу (https://t.me)
             if topic_id and topic_id != 0:
-                topic_display = f'<a href="https://t.me{topic_id}">{name_of_topic}</a>'
+                topic_display = f'<a href="https://t.me/GameFloid/{topic_id}">{name_of_topic}</a>'
             else:
                 topic_display = "<b>Основной чат</b>"
             
