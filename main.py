@@ -48,7 +48,7 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: МГНОВЕННЫЙ ПЕРЕХВАТ ПРИ ПРЯМОМ ПОПАДАНИИ ВЕБХУКА ---
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ ПРЯМОЕ СООБЩЕНИЕ ОТ СТОРОННЕГО БОТА (ЕСЛИ ДОЛЕТИТ ВЕБХУК) ---
     is_target_bot = False
     
     if message.from_user:
@@ -63,12 +63,12 @@ async def moderate_chat(message: Message):
     if is_target_bot:
         try:
             await message.delete()
-            logger.info(f"Мгновенно удалено входящее сообщение BR Assistant в топике {current_topic}")
-        except Exception as e:
-            logger.warning(f"Не удалось мгновенно удалить входящее сообщение BR Assistant: {e}")
+            logger.info(f"Мгновенно удалено прямое сообщение BR Assistant в топике {current_topic}")
+        except Exception:
+            pass
         return
 
-    # --- СЦЕНАРИЙ 2: КОМАНДА ОТ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ ---
+    # --- СЦЕНАРИЙ 2: ПЕРЕХВАТ И ИНВЕРТИРОВАННАЯ ОЧИСТКА КОМАНДЫ ЮЗЕРА ---
     if message.text:
         text = message.text.lower().strip()
 
@@ -85,52 +85,60 @@ async def moderate_chat(message: Message):
             try:
                 command_msg_id = message.message_id
                 chat_id = message.chat.id
+                user_id = message.from_user.id
+                user_first_name = message.from_user.first_name
 
-                # 1. Мгновенно удаляем запрещенную команду юзера
-                await message.delete()
-                logger.info(f"Удалена команда (ID: {command_msg_id}) в топике {current_topic}")
+                logger.info(f"Обнаружена команда (ID: {command_msg_id}) в топике {current_topic}. Запуск инвертированной очистки...")
 
-                # 2. Отправляем предупреждение через HTML
-                user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
-                warning_text = (
-                    f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
-                    f"можно строго в теме <b><a href='{CHAT_LINK}'>Чат общения</a></b>!"
-                )
-
-                warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
-                logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg.message_id})")
-
-                # 3. ТОЧЕЧНЫЙ КОНТРОЛЬ С ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ (10 СЕКУНД)
-                async def targeted_cleanup(chat_id, start_id, warn_to_delete):
-                    # Проверяем чат в течение 10 секунд
-                    for cycle in range(10):
-                        await asyncio.sleep(1.0)
+                # Запускаем асинхронную задачу, которая сначала удалит ответ BR Assistant, а затем команду юзера
+                async def smart_inverted_cleanup(chat_id, cmd_id, u_id, u_name):
+                    # Проверяем появление ответа в течение 3 секунд мелкими шагами (очень агрессивно)
+                    for cycle in range(6):
+                        await asyncio.sleep(0.5)
                         
-                        # Проверяем строго следующие 15 ID сообщений вперед
-                        for next_id in range(start_id + 1, start_id + 16):
-                            if next_id == warn_to_delete.message_id:
-                                continue
+                        # Проверяем строго следующие ID сообщений, которые создаются поверх команды
+                        for next_id in range(cmd_id + 1, cmd_id + 6):
                             try:
+                                # Удаляем ответ чужого бота
                                 await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                                logger.info(f"В цикле {cycle+1} точечно уничтожен ответ стороннего бота (ID: {next_id})")
-                            except Exception as e:
-                                # Если ошибка НЕ связана с тем, что сообщения просто нет ("message to delete not found"),
-                                # выводим реальную причину отказа от Telegram в логи.
-                                error_msg = str(e)
-                                if "message to delete not found" not in error_msg.lower():
-                                    logger.warning(f"Цикл {cycle+1}: Ошибка удаления ID {next_id} -> {error_msg}")
+                                logger.info(f"Шаг {cycle+1}: Успешно удален ответ BR Assistant (ID: {next_id})")
+                            except Exception:
+                                pass
 
-                    # Удаляем только своё предупреждение по истечении 10 секунд
+                    # Когда чужой бот стерт, удаляем само исходное сообщение (команду пользователя)
                     try:
-                        await warn_to_delete.delete()
+                        await bot.delete_message(chat_id=chat_id, message_id=cmd_id)
+                        logger.info(f"Исходная команда юзера (ID: {cmd_id}) успешно удалена.")
+                    except Exception as e:
+                        logger.warning(f"Не удалось удалить команду юзера: {e}")
+
+                    # Только ТЕПЕРЬ, когда всё кристально чисто, отправляем варн
+                    try:
+                        user_html_mention = f'<a href="tg://user?id={u_id}">{u_name}</a>'
+                        warning_text = (
+                            f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
+                            f"можно строго в теме <b><a href='{CHAT_LINK}'>Чат общения</a></b>!"
+                        )
+                        warn_msg = await bot.send_message(
+                            chat_id=chat_id, 
+                            text=warning_text, 
+                            parse_mode="HTML", 
+                            message_thread_id=current_topic,
+                            disable_web_page_preview=True
+                        )
+                        logger.info(f"Предупреждение успешно отправлено в финале (ID: {warn_msg.message_id})")
+                        
+                        # Ждем 10 секунд видимости чистого варна и удаляем его
+                        await asyncio.sleep(10.0)
+                        await warn_msg.delete()
                         logger.info("Временное предупреждение успешно удалено по таймеру.")
                     except Exception as err:
-                        logger.error(f"Не удалось удалить варн: {err}")
+                        logger.error(f"Ошибка при обработке варна: {err}")
 
-                asyncio.create_task(targeted_cleanup(chat_id, command_msg_id, warn_msg))
+                asyncio.create_task(smart_inverted_cleanup(chat_id, command_msg_id, user_id, user_first_name))
 
             except Exception as e:
-                logger.error(f"Ошибка в процессе модерации команд: {e}")
+                logger.error(f"Ошибка инициализации модерации: {e}")
 
 # 3. ОБРАБОТЧИК ВЕБХУКОВ
 async def handle_webhook(request):
