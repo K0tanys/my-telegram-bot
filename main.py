@@ -12,16 +12,16 @@ logger = logging.getLogger(__name__)
 # Загрузка конфигурации из переменных окружения (Render)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
-ALLOWED_TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
+ALLOWED_TOPIC_ID = 18600  # Жестко закрепленный ID темы из ссылки на скриншоте
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ИСПРАВЛЕНО ЖЕСТКО: Полная правильная ссылка для нарушителей на топик "Чат для общения"
+# Ссылка для нарушителей строго со скриншота
 CHAT_LINK = "https://t.me/GameFloid/18600"
 
-# Полный словарь тем со всех твоих скриншотов
+# Полный словарь тем
 TOPIC_NAMES = {
     1: "General",
     18600: "Чат для общения",
@@ -61,38 +61,39 @@ async def keep_alive():
 
 # 3. АБСОЛЮТНО ИЗОЛИРОВАННЫЙ КРАТКОСРОЧНЫЙ ПАТРУЛЬ
 async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, first_name, username, command_text):
-    # --- КРАСИВЫЙ КРАТКИЙ ОТЧЁТ С НАЗВАНИЕМ ТЕМЫ ДЛЯ АДМИНОВ ---
-    # Отправляем админам сразу (через 0.5 сек), чтобы не ждать удаления варна на клиенте
+    # --- ОТЧЁТ С НАЗВАНИЕМ ТЕМЫ ДЛЯ АДМИНОВ ---
     await asyncio.sleep(0.5)
     if ADMIN_CHAT_ID:
         try:
-            mention = f"[{first_name}](tg://user?id={user_id})"
+            # Безопасное экранирование для HTML
+            safe_name = first_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            safe_cmd = command_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            
+            mention = f'<a href="tg://user?id={user_id}">{safe_name}</a>'
             tg_username = f" | @{username}" if username else ""
             
-            # Находим имя темы из словаря
             name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
             
-            # ИСПРАВЛЕНО ЖЕСТКО: Полная правильная ссылка для админов по твоему образцу
             if topic_id and topic_id != 0:
                 full_url = f"https://t.me/GameFloid/{topic_id}"
-                topic_display = f"[{name_of_topic}]({full_url})"
+                topic_display = f'<a href="{full_url}">{name_of_topic}</a>'
             else:
-                topic_display = "`Основной чат`"
+                topic_display = "<code>Основной чат</code>"
             
             report_text = (
-                "🚨 **Отчёт о нарушении правил чата**\n\n"
-                f"👤 **Нарушитель:** {mention}{tg_username}\n"
-                f"🆔 **ID пользователя:** `{user_id}`\n"
-                f"🏷 **Тема нарушения:** {topic_display}\n"
-                f"⌨️ **Запрещённая команда:** `{command_text}`\n\n"
-                "🗑 *Команда пользователя и предупреждение бота успешно зачищены.*"
+                "🚨 <b>Отчёт о нарушении правил чата</b>\n\n"
+                f"👤 <b>Нарушитель:</b> {mention}{tg_username}\n"
+                f"🆔 <b>ID пользователя:</b> <code>{user_id}</code>\n"
+                f"🏷 <b>Тема нарушения:</b> {topic_display}\n"
+                f"⌨️ <b>Запрещённая команда:</b> <code>{safe_cmd}</code>\n\n"
+                "<i>🗑 Команда пользователя и предупреждение бота успешно зачищены.</i>"
             )
-            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_text, parse_mode="Markdown")
+            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_text, parse_mode="HTML")
             logger.info(f"Отчёт по пользователю {user_id} успешно отправлен администрации.")
         except Exception as e:
             logger.error(f"Не удалось отправить отчёт админам: {e}")
 
-    # Патрулируем хвосты в фоне, полностью изолировав ошибки
+    # Патрулируем хвосты в фоне
     try:
         for cycle in range(4):
             await asyncio.sleep(0.5)
@@ -106,10 +107,10 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
     except Exception as e:
         logger.error(f"Ошибка патруля хвостов: {e}")
 
-    # Ждем оставшееся время (еще 5.5 секунд), чтобы пользователь успел прочесть варн
-    await asyncio.sleep(5.5)
+    # Ждем, чтобы пользователь успел прочесть варн (увеличено до 10 секунд общего времени)
+    await asyncio.sleep(10.5)
     
-    # ЖЕСТКОЕ ПРИНУДИТЕЛЬНОЕ УДАЛЕНИЕ СОБСТВЕННОГО ВАРНА
+    # Принудительное удаление варна бота
     try:
         await bot.delete_message(chat_id=chat_id, message_id=warn_msg_id)
         logger.info(f"Варн ID {warn_msg_id} успешно удален принудительно.")
@@ -121,7 +122,7 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
 async def moderate_chat(message: Message):
     current_topic = message.message_thread_id if message.message_thread_id else 0
 
-    # Если это разрешенный "Чат для общения" — вообще ничего не трогаем
+    # Если это разрешенный "Чат для общения" — игнорируем
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
@@ -167,18 +168,20 @@ async def moderate_chat(message: Message):
                 await message.delete()
                 logger.info(f"Мгновенно стерта команда пользователя {command_msg_id} в теме {current_topic}")
 
-                # 2. Отправляем предупреждение через Маркдаун с точной полной ссылкой
-                user_mention = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
+                # 2. Отправляем предупреждение через HTML (ссылка жестко со скриншота)
+                safe_first_name = message.from_user.first_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                user_mention = f'<a href="tg://user?id={message.from_user.id}">{safe_first_name}</a>'
+                
                 warning_text = (
-                    f"⚠️ {user_mention}, использовать команды бота **BR Assistant**\n"
-                    f"можно строго в теме **[Чат для общения]({CHAT_LINK})**!"
+                    f"⚠️ {user_mention}, использовать команды бота <b>BR Assistant</b>\n"
+                    f'можно строго в теме <b><a href="{CHAT_LINK}">Чат для общения</a></b>!'
                 )
 
-                warn_msg = await message.answer(warning_text, parse_mode="Markdown", disable_web_page_preview=True)
+                warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
                 warn_msg_id = warn_msg.message_id
                 logger.info(f"Предупреждение отправлено в тему {current_topic} (ID варна: {warn_msg_id})")
 
-                # Передаем параметры и данные нарушителя в фоновый патруль
+                # Передаем параметры в фоновый патруль
                 asyncio.create_task(
                     quick_cleanup(
                         chat_id=chat_id,
@@ -207,7 +210,6 @@ async def handle_webhook(request):
 
         json_data = await request.json()
         
-        # Преобразуем словарь в объект Update
         telegram_update = Update(**json_data)
         await dp.feed_update(bot, telegram_update)
         
