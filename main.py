@@ -90,7 +90,7 @@ async def moderate_chat(message: Message):
                 await message.delete()
                 logger.info(f"Мгновенно стерта команда (ID: {command_msg_id}) в топике {current_topic}")
 
-                # 2. Отправляем предупреждение через HTML с обновленным текстом
+                # 2. Отправляем предупреждение через HTML
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
                 warning_text = (
                     f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
