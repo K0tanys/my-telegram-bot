@@ -19,9 +19,9 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Твоя прямая ссылка на тему "Чат общения"
-CHAT_LINK = "https://t.me/GameFloid/18600"
+CHAT_LINK = "https://t.me"
 
-# Список активных топиков, где прямо сейчас тикает 10-секундный режим зачистки
+# Список активных топиков, где прямо сейчас тикает режим зачистки
 active_cleanup_topics = set()
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
@@ -51,13 +51,13 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ АБСОЛЮТНО ЛЮБОГО БОТА В МОМЕНТ ЗАЧИСТКИ ---
+    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ ЛЮБОГО БОТА В МОМЕНТ ЗАЧИСТКИ ---
     if message.from_user.is_bot:
-        # Если в этой теме сейчас тикают 10 секунд зачистки — сносим любого бота без разбора имени
+        # Если в этой теме сейчас активен режим зачистки — сносим сообщения любого бота
         if current_topic in active_cleanup_topics:
             try:
                 await message.delete()
-                logger.info(f"❌ Перехвачен и удален ответ бота (ID: {message.from_user.id}) в топике {current_topic}")
+                logger.info(f"❌ Перехвачен и удален запоздалый ответ бота (ID: {message.from_user.id}) в топике {current_topic}")
             except Exception as e:
                 logger.error(f"Не удалось удалить сообщение стороннего бота: {e}")
         return
@@ -97,14 +97,17 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="Markdown", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic}")
                 
-                # 3. Ждем ровно 10 секунд. Если за эти 10 секунд прилетит ответ от BR Assist, 
-                # верхняя часть кода (Сценарий 1) его мгновенно поймает и сотрет.
+                # 3. Ждем 10 секунд и удаляем НАШЕ предупреждение, чтобы оно не висело долго
                 await asyncio.sleep(10)
-                
-                # Выключаем режим зачистки для топика и удаляем предупреждение
                 await warn_msg.delete()
+                logger.info(f"Предупреждение удалено, но режим зачистки топика {current_topic} продолжается...")
+                
+                # 4. Ждем ЕЩЕ 5 секунд (итого 15 секунд защиты чата), чтобы поймать супер-медленные ответы BR Assist
+                await asyncio.sleep(5)
+                
+                # Полностью выключаем режим зачистки для этого топика
                 active_cleanup_topics.discard(current_topic)
-                logger.info(f"Режим зачистки топика {current_topic} завершен. Предупреждение удалено.")
+                logger.info(f"Режим зачистки топика {current_topic} полностью завершен.")
                 
             except Exception as e:
                 logger.error(f"Ошибка в процессе модерации: {e}")
