@@ -68,10 +68,10 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
             mention = f"[{first_name}](tg://user?id={user_id})"
             tg_username = f" | @{username}" if username else ""
             
-            # Собираем правильную публичную ссылку на тему через название группы GameFloid
+            # Жесткое и прямое формирование ссылки без косяков парсера Markdown
             if topic_id and topic_id != 0:
                 topic_link = f"https://t.me/GameFloid/{topic_id}"
-                topic_display = f"[{topic_id}]({topic_link})"
+                topic_display = f"[Перейти в тему {topic_id}]({topic_link})"
             else:
                 topic_display = "`Основной чат`"
             
