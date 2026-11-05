@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# ID темы "Чат общения", где разрешено использовать команды
+# ID темы "Чат для общения", где разрешено использовать команды
 ALLOWED_TOPIC_ID = int(os.getenv("TOPIC_ID", 0))
 # URL твоего приложения на Render
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
@@ -18,7 +18,7 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Твоя точная прямая ссылка на тему "Чат общения"
+# Твоя точная прямая ссылка на тему "Чат для общения"
 CHAT_LINK = "https://t.me"
 
 # 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
@@ -44,7 +44,7 @@ async def keep_alive():
 async def moderate_chat(message: Message):
     current_topic = message.message_thread_id if message.message_thread_id else 0
 
-    # Если это разрешенный "Чат общения" — вообще ничего не трогаем
+    # Если это разрешенный "Чат для общения" — вообще ничего не трогаем
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
@@ -86,46 +86,49 @@ async def moderate_chat(message: Message):
                 command_msg_id = message.message_id
                 chat_id = message.chat.id
 
-                # 1. Сверхбыстрое удаление команды пользователя, чтобы чужой бот не успел считать вебхук
+                # 1. Мгновенно стираем команду пользователя
                 await message.delete()
-                logger.info(f"Мгновенно стерта запрещенная команда (ID: {command_msg_id}) в топике {current_topic}")
+                logger.info(f"Мгновенно стерта команда (ID: {command_msg_id}) в топике {current_topic}")
 
-                # 2. Отправляем предупреждение через HTML
+                # 2. Отправляем предупреждение через HTML с обновленным текстом
                 user_html_mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.first_name}</a>'
                 warning_text = (
                     f"⚠️ {user_html_mention}, использовать команды бота <b>BR Assistant</b>\n"
-                    f"можно строго в теме <b><a href='{CHAT_LINK}'>Чат общения</a></b>!"
+                    f"можно строго в теме <b><a href='{CHAT_LINK}'>Чат для общения</a></b>!"
                 )
 
                 warn_msg = await message.answer(warning_text, parse_mode="HTML", disable_web_page_preview=True)
-                logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg.message_id})")
+                warn_msg_id = warn_msg.message_id
+                logger.info(f"Предупреждение отправлено в топик {current_topic} (ID варна: {warn_msg_id})")
 
-                # 3. КРАТКОСРОЧНЫЙ ПАТРУЛЬ НА СЛУЧАЙ ХВОСТОВ (Очистка +4 ID вперед за 2 секунды)
-                async def quick_cleanup(chat_id, cmd_id, warn_obj):
-                    # Проверяем чат 4 раза каждые 0.5 секунды
+                # 3. АБСОЛЮТНО ИЗОЛИРОВАННЫЙ КРАТКОСРОЧНЫЙ ПАТРУЛЬ (Работает строго по числовым ID)
+                async def quick_cleanup(c_id, cmd_id, protect_warn_id):
+                    # Проверяем чат 4 раза каждые 0.5 секунды для зачистки хвостов
                     for cycle in range(4):
                         await asyncio.sleep(0.5)
                         for next_id in range(cmd_id + 1, cmd_id + 5):
-                            if next_id == warn_obj.message_id:
+                            # Жесткая изоляция: не трогаем именно этот конкретный варн
+                            if next_id == protect_warn_id:
                                 continue
                             try:
-                                await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                                logger.info(f"Патруль (шаг {cycle+1}): Удален проскочивший ID {next_id}")
+                                await bot.delete_message(chat_id=c_id, message_id=next_id)
+                                logger.info(f"Патруль топика {current_topic}: Удален хвост ID {next_id}")
                             except Exception:
                                 pass
 
-                    # Ждем еще 8 секунд (чтобы суммарно варн провисел 10 секунд) и удаляем его
+                    # Ждем оставшиеся 8 секунд и удаляем строго свой варн по его ID
                     await asyncio.sleep(8.0)
                     try:
-                        await warn_obj.delete()
-                        logger.info("Временное предупреждение успешно удалено по таймеру.")
+                        await bot.delete_message(chat_id=c_id, message_id=protect_warn_id)
+                        logger.info(f"Варн ID {protect_warn_id} успешно удален в топике {current_topic}")
                     except Exception as err:
-                        logger.error(f"Не удалось удалить варн: {err}")
+                        logger.error(f"Не удалось принудительно удалить варн {protect_warn_id}: {err}")
 
-                asyncio.create_task(quick_cleanup(chat_id, command_msg_id, warn_msg))
+                # Передаем только изолированные цифры (ID чата, ID команды, ID варна)
+                asyncio.create_task(quick_cleanup(chat_id, command_msg_id, warn_msg_id))
 
             except Exception as e:
-                logger.error(f"Ошибка в процессе быстрой модерации: {e}")
+                logger.error(f"Ошибка в процессе изолированной модерации: {e}")
 
 # 3. ОБРАБОТЧИК ВЕБХУКОВ
 async def handle_webhook(request):
