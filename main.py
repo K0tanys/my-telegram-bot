@@ -23,11 +23,10 @@ TARGET_BOT_USERNAME = "blackrussiaassistantbot"
 TARGET_BOT_NAME_PART = "assist"
 
 # Твоя прямая ссылка на тему "Чат общения"
-CHAT_LINK = "https://t.me/GameFloid/18600"
+CHAT_LINK = "https://t.me"
 
-# 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
+# 1. ЗАЗАЩИТА ОТ СНА (ПИНГЕР)
 async def keep_alive():
-    """Каждые 35 секунд пингует сам себя, чтобы Render не тушил сервер"""
     if not RENDER_URL:
         logger.warning("RENDER_EXTERNAL_URL не найдена. Автопинг отключен.")
         return
@@ -53,17 +52,16 @@ async def moderate_chat(message: Message):
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    # --- СЦЕНАРИЙ 1: СООБЩЕНИЕ ОТ БОТА BR ASSIST (Текст, Картинки, Кнопки) ---
+    # --- СЦЕНАРИЙ 1: ЛЮБОЕ СООБЩЕНИЕ ОТ БОТА BR ASSIST ---
     if message.from_user.is_bot:
         username = message.from_user.username.lower() if message.from_user.username else ""
         first_name = message.from_user.first_name.lower() if message.from_user.first_name else ""
         
         if TARGET_BOT_USERNAME in username or TARGET_BOT_NAME_PART in first_name:
             try:
-                # Даем микропаузу, чтобы сообщение точно долетело, и сносим
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
                 await message.delete()
-                logger.info(f"❌ Удалено долетевшее сообщение от бота BR Assist в топике {current_topic}")
+                logger.info(f"❌ Удалено сообщение стороннего бота в топике {current_topic}")
             except Exception as e:
                 logger.error(f"Не удалось удалить сообщение стороннего бота: {e}")
         return
@@ -85,9 +83,9 @@ async def moderate_chat(message: Message):
             try:
                 # 1. Мгновенно удаляем запрещенную команду юзера
                 await message.delete()
-                logger.info(f"🧹 Удалена команда {text.split()} от пользователя {message.from_user.id}")
+                logger.info(f"🧹 Удалена команда от пользователя {message.from_user.id}")
                 
-                # Небольшая задержка перед выводом предупреждения
+                # Задержка перед выводом предупреждения (1 секунда)
                 await asyncio.sleep(1.0)
                 
                 # 2. Отправляем предупреждение с кликабельной ссылкой
@@ -100,8 +98,8 @@ async def moderate_chat(message: Message):
                 warn_msg = await message.answer(warning_text, parse_mode="Markdown", disable_web_page_preview=True)
                 logger.info(f"Предупреждение отправлено в топик {current_topic}")
                 
-                # 3. Ждем 5 секунд и удаляем наше предупреждение
-                await asyncio.sleep(5)
+                # 3. Ждем ровно 10 секунд и удаляем наше предупреждение
+                await asyncio.sleep(10)
                 await warn_msg.delete()
                 logger.info("Временное предупреждение успешно удалено.")
                 
