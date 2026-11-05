@@ -19,7 +19,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Ссылка для нарушителей строго со скриншота
-CHAT_LINK = "https://t.me"
+CHAT_LINK = "https://t.me/GameFloid/18600"
 
 # Полный словарь тем
 TOPIC_NAMES = {
@@ -75,7 +75,8 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
             name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
             
             if topic_id and topic_id != 0:
-                full_url = f"https://t.me{topic_id}"
+                # Ссылка для админов
+                full_url = f"https://t.me/GameFloid/{topic_id}"
                 topic_display = f'<a href="{full_url}">{name_of_topic}</a>'
             else:
                 topic_display = "<code>Основной чат</code>"
@@ -107,7 +108,7 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
     except Exception as e:
         logger.error(f"Ошибка патруля хвостов: {e}")
 
-    # Ждем, чтобы пользователь успел прочесть варн
+    # Ждем, чтобы пользователь успел прочесть варн (10 секунд удержания)
     await asyncio.sleep(10.5)
     
     # Принудительное удаление варна бота
@@ -120,7 +121,7 @@ async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, fir
 # 2. ОБЩИЙ ХЕНДЛЕР ДЛЯ МОДЕРАЦИИ И УВЕДОМЛЕНИЙ
 @dp.message()
 async def moderate_chat(message: Message):
-    # ЖЕСТКАЯ ЗАЩИТА: Если сообщение пришло из чата админов — бот его ВООБЩЕ не модерирует
+    # ЖЕСТКАЯ ЗАЩИТА: Если сообщение из чата админов — бот его ВООБЩЕ не трогает
     if ADMIN_CHAT_ID and message.chat.id == ADMIN_CHAT_ID:
         return
 
