@@ -6,13 +6,19 @@ from telethon import TelegramClient, events
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Данные авторизации из окружения Render
-API_ID = 38378220
-API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("TELETHON_SESSION")
+# Импортируем настройки из вашего существующего config.py
+try:
+    from config import API_ID, API_HASH, TELETHON_SESSION
+    logger.info("Конфигурация успешно импортирована из config.py")
+except Exception as config_err:
+    logger.warning(f"Не удалось импортировать из config.py ({config_err}), пробуем окружение...")
+    API_ID = 38378220
+    API_HASH = os.getenv("API_HASH")
+    TELETHON_SESSION = os.getenv("TELETHON_SESSION")
 
-if not API_HASH or not SESSION_STRING:
-    logger.error("Критические переменные окружения (API_HASH или TELETHON_SESSION) отсутствуют!")
+# Проверяем наличие критических данных
+if not API_HASH or not TELETHON_SESSION:
+    logger.error(f"Ошибка: API_HASH или TELETHON_SESSION не найдены! API_HASH={'OK' if API_HASH else 'None'}, SESSION={'OK' if TELETHON_SESSION else 'None'}")
     exit(1)
 
 # Юзернеймы для автоматического поиска ID при старте
@@ -26,7 +32,7 @@ target_bot_ids = set()
 
 # Инициализация клиента
 from telethon.sessions import StringSession
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+client = TelegramClient(StringSession(str(TELETHON_SESSION).strip()), int(API_ID), str(API_HASH).strip())
 
 @client.on(events.NewMessage)
 async def my_event_handler(event):
