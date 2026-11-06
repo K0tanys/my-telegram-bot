@@ -31,27 +31,33 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+RENDER_EXTERNAL_URL = os.getenv(
+    "RENDER_EXTERNAL_URL", ""
+).rstrip("/")
 
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 PORT = int(os.getenv("PORT", "10000"))
 
+# ID разрешённой темы
 ALLOWED_TOPIC_ID = 18600
+
+# Username BR Assistant
 TARGET_BOT_USERNAME = "brassgay"
 
+# Время жизни предупреждения
 WARNING_DELETE_DELAY = 12
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN")
 
-if not RENDER_EXTERNAL_URL:
-    raise RuntimeError("Не задан RENDER_EXTERNAL_URL")
+if not RENDER_EXTERNAL_URL.startswith("https://"):
+    raise RuntimeError("Неверный RENDER_EXTERNAL_URL")
 
 if not WEBHOOK_SECRET:
     raise RuntimeError("Не задан WEBHOOK_SECRET")
 
-if not RENDER_EXTERNAL_URL.startswith("https://"):
-    raise RuntimeError("RENDER_EXTERNAL_URL должен начинаться с https://")
+if not (1 <= len(WEBHOOK_SECRET) <= 256):
+    raise RuntimeError("Неверная длина WEBHOOK_SECRET")
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -86,10 +92,10 @@ def normalize_commands(commands):
         if not command:
             continue
 
-        if not command.startswith("/"):
-            command = "/" + command
+        command = command.lstrip("/")
 
         result.add(command)
+        result.add("/" + command)
 
     return result
 
@@ -103,6 +109,7 @@ def is_target_command(text):
 
     first_part = text.strip().split(maxsplit=1)[0]
 
+    # Учитываем команды вида /start@BotName
     command = first_part.split("@", 1)[0].lower()
 
     return command in TARGET_COMMAND_SET
@@ -152,7 +159,24 @@ def create_background_task(coro):
 
 
 # ==================================================
-# 3. ОТЧЁТ АДМИНИСТРАЦИИ
+# 3. ССЫЛКА НА КОНКРЕТНУЮ ТЕМУ
+# ==================================================
+
+def get_topic_link(topic_id):
+    if not topic_id:
+        return None
+
+    # CHAT_LINK содержит ссылку на разрешённую тему.
+    # Используем её основу для построения ссылок
+    # на остальные темы той же публичной группы.
+
+    base_url = CHAT_LINK.rstrip("/").rsplit("/", 1)[0]
+
+    return f"{base_url}/{topic_id}"
+
+
+# ==================================================
+# 4. ОТЧЁТ АДМИНИСТРАЦИИ
 # ==================================================
 
 async def send_admin_report(
@@ -163,6 +187,7 @@ async def send_admin_report(
     command_text,
     command_deleted
 ):
+
     if not ADMIN_CHAT_ID:
         return
 
@@ -184,12 +209,23 @@ async def send_admin_report(
             )
         )
 
+        # Создаём кликабельную ссылку на тему.
+        topic_url = get_topic_link(topic_id)
+
+        if topic_url:
+            topic_display = (
+                f'<a href="{escape(topic_url)}">'
+                f'{topic_name}</a>'
+            )
+        else:
+            topic_display = topic_name
+
         report_text = (
             "🚨 <b>Отчёт о нарушении правил чата</b>\n\n"
             f"👤 <b>Нарушитель:</b> {mention}{username_text}\n"
             f"🆔 <b>ID пользователя:</b> "
             f"<code>{user_id}</code>\n"
-            f"🏷 <b>Тема нарушения:</b> {topic_name}\n"
+            f"🏷 <b>Тема нарушения:</b> {topic_display}\n"
             f"⌨️ <b>Запрещённая команда:</b> "
             f"<code>{escape(command_text)}</code>\n\n"
             f"🗑 <b>Удаление команды:</b> "
@@ -203,19 +239,22 @@ async def send_admin_report(
         )
 
         logger.info(
-            "Отчёт администрации отправлен. User ID: %s",
+            "Отчёт отправлен администрации. User ID: %s",
             user_id
         )
 
     except TelegramAPIError:
-        logger.exception("Ошибка отправки отчёта администрации")
+        logger.exception(
+            "Ошибка отправки отчёта администрации"
+        )
 
 
 # ==================================================
-# 4. УДАЛЕНИЕ ПРЕДУПРЕЖДЕНИЯ
+# 5. УДАЛЕНИЕ ПРЕДУПРЕЖДЕНИЯ
 # ==================================================
 
 async def cleanup_warning(chat_id, warning_id):
+
     try:
         await asyncio.sleep(WARNING_DELETE_DELAY)
 
@@ -240,7 +279,7 @@ async def cleanup_warning(chat_id, warning_id):
 
 
 # ==================================================
-# 5. МОДЕРАЦИЯ ЧАТА
+# 6. МОДЕРАЦИЯ ЧАТА
 # ==================================================
 
 @dp.message()
@@ -274,7 +313,7 @@ async def moderate_chat(message: Message):
 
         return
 
-    # Не трогаем остальных ботов.
+    # Остальных ботов не трогаем.
     if message.from_user and message.from_user.is_bot:
         return
 
@@ -282,7 +321,7 @@ async def moderate_chat(message: Message):
     if message.from_user and message.from_user.id == BOT_ID:
         return
 
-    # Проверяем текст.
+    # Проверяем текст сообщения.
     if not message.text:
         return
 
@@ -300,12 +339,12 @@ async def moderate_chat(message: Message):
     command_text = message.text
 
     logger.info(
-        "Запрещённая команда обнаружена: %s, пользователь: %s",
+        "Запрещённая команда: %s, пользователь: %s",
         command_text,
         user_id
     )
 
-    # Создаём предупреждение.
+    # Формируем предупреждение.
     warning_text = (
         f"⚠️ <a href=\"tg://user?id={user_id}\">"
         f"{escape(first_name)}</a>, использовать команды бота "
@@ -317,6 +356,7 @@ async def moderate_chat(message: Message):
 
     warning_id = None
 
+    # Отправляем предупреждение в текущую тему.
     try:
         warning = await bot.send_message(
             chat_id=chat_id,
@@ -330,13 +370,16 @@ async def moderate_chat(message: Message):
         warning_id = warning.message_id
 
     except TelegramAPIError:
-        logger.exception("Не удалось отправить предупреждение")
+        logger.exception(
+            "Не удалось отправить предупреждение"
+        )
 
-    # Удаляем только команду нарушителя.
+    # Удаляем только запрещённую команду.
     command_deleted = False
 
     try:
         await message.delete()
+
         command_deleted = True
 
         logger.info(
@@ -345,7 +388,9 @@ async def moderate_chat(message: Message):
         )
 
     except TelegramAPIError:
-        logger.exception("Не удалось удалить команду")
+        logger.exception(
+            "Не удалось удалить команду"
+        )
 
     # Отправляем отчёт администрации.
     await send_admin_report(
@@ -365,10 +410,11 @@ async def moderate_chat(message: Message):
 
 
 # ==================================================
-# 6. HEALTH CHECK
+# 7. ПРОВЕРКА ДОСТУПНОСТИ RENDER
 # ==================================================
 
 async def healthcheck(request):
+
     return web.Response(
         text="Telegram bot server is running",
         status=200
@@ -376,7 +422,7 @@ async def healthcheck(request):
 
 
 # ==================================================
-# 7. TELEGRAM WEBHOOK
+# 8. TELEGRAM WEBHOOK
 # ==================================================
 
 async def handle_webhook(request):
@@ -390,7 +436,10 @@ async def handle_webhook(request):
         received_secret,
         WEBHOOK_SECRET
     ):
-        logger.warning("Неверный секрет вебхука")
+
+        logger.warning(
+            "Получен вебхук с неверным секретом"
+        )
 
         return web.Response(
             text="Forbidden",
@@ -406,7 +455,9 @@ async def handle_webhook(request):
         )
 
     except (ValueError, TypeError, json.JSONDecodeError):
-        logger.exception("Некорректный JSON вебхука")
+        logger.exception(
+            "Некорректный JSON вебхука"
+        )
 
         return web.Response(
             text="Bad Request",
@@ -425,7 +476,9 @@ async def handle_webhook(request):
         )
 
     except Exception:
-        logger.exception("Ошибка обработки Telegram Update")
+        logger.exception(
+            "Ошибка обработки Telegram Update"
+        )
 
         return web.Response(
             text="Internal Server Error",
@@ -434,7 +487,7 @@ async def handle_webhook(request):
 
 
 # ==================================================
-# 8. ЗАПУСК СЕРВЕРА
+# 9. ЗАПУСК СЕРВЕРА
 # ==================================================
 
 async def main_async():
@@ -451,7 +504,8 @@ async def main_async():
     app.router.add_post("/", handle_webhook)
 
     try:
-        # Получаем информацию о боте один раз.
+
+        # Получаем ID собственного бота.
         bot_info = await bot.get_me()
 
         BOT_ID = bot_info.id
@@ -462,6 +516,7 @@ async def main_async():
             BOT_ID
         )
 
+        # Запускаем HTTP-сервер.
         await runner.setup()
 
         site = web.TCPSite(
@@ -477,19 +532,22 @@ async def main_async():
             PORT
         )
 
-        # Устанавливаем защищённый webhook.
+        # Устанавливаем защищённый вебхук.
         await bot.set_webhook(
             url=RENDER_EXTERNAL_URL,
             secret_token=WEBHOOK_SECRET,
             drop_pending_updates=False
         )
 
-        logger.info("Telegram Webhook успешно установлен")
+        logger.info(
+            "Telegram Webhook успешно установлен"
+        )
 
-        # Сервер работает до остановки процесса.
+        # Поддерживаем работу приложения.
         await asyncio.Event().wait()
 
     finally:
+
         logger.info("Остановка бота")
 
         for task in list(background_tasks):
@@ -506,7 +564,7 @@ async def main_async():
 
 
 # ==================================================
-# 9. ТОЧКА ВХОДА
+# 10. ТОЧКА ВХОДА
 # ==================================================
 
 if __name__ == "__main__":
