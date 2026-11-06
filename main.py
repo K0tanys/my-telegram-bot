@@ -1,206 +1,518 @@
-# main.py
+
 import asyncio
+import html
+import hmac
+import json
 import logging
 import os
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, Update
-from aiohttp import web, ClientSession
+from contextlib import suppress
 
-# Импортируем настройки из файла config.py
+from aiohttp import web
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import Message, Update
+
 from config import CHAT_LINK, TARGET_COMMANDS, TOPIC_NAMES
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# ==================================================
+# 1. НАСТРОЙКИ
+# ==================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 logger = logging.getLogger(__name__)
 
-# Загрузка конфигурации из переменных окружения (Render)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
-ALLOWED_TOPIC_ID = 18600  
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
-bot = Bot(token=BOT_TOKEN)
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
+PORT = int(os.getenv("PORT", "10000"))
+
+ALLOWED_TOPIC_ID = 18600
+TARGET_BOT_USERNAME = "brassgay"
+
+WARNING_DELETE_DELAY = 12
+
+if not BOT_TOKEN:
+    raise RuntimeError("Не задан BOT_TOKEN")
+
+if not RENDER_EXTERNAL_URL:
+    raise RuntimeError("Не задан RENDER_EXTERNAL_URL")
+
+if not WEBHOOK_SECRET:
+    raise RuntimeError("Не задан WEBHOOK_SECRET")
+
+if not RENDER_EXTERNAL_URL.startswith("https://"):
+    raise RuntimeError("RENDER_EXTERNAL_URL должен начинаться с https://")
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
+    )
+)
+
 dp = Dispatcher()
 
-# 1. ЗАЩИТА ОТ СНА (ПИНГЕР)
-async def keep_alive():
-    if not RENDER_EXTERNAL_URL:
-        logger.warning("RENDER_EXTERNAL_URL не найдена. Автопинг отключен.")
+BOT_ID = None
+background_tasks = set()
+
+
+# ==================================================
+# 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==================================================
+
+def escape(value):
+    return html.escape(str(value or ""), quote=True)
+
+
+def normalize_commands(commands):
+    if isinstance(commands, str):
+        commands = (commands,)
+
+    result = set()
+
+    for command in commands:
+        command = str(command).strip().lower()
+
+        if not command:
+            continue
+
+        if not command.startswith("/"):
+            command = "/" + command
+
+        result.add(command)
+
+    return result
+
+
+TARGET_COMMAND_SET = normalize_commands(TARGET_COMMANDS)
+
+
+def is_target_command(text):
+    if not text:
+        return False
+
+    first_part = text.strip().split(maxsplit=1)[0]
+
+    command = first_part.split("@", 1)[0].lower()
+
+    return command in TARGET_COMMAND_SET
+
+
+def is_target_bot_message(message: Message):
+    if message.from_user:
+        username = message.from_user.username
+
+        if (
+            message.from_user.is_bot
+            and username
+            and username.lower() == TARGET_BOT_USERNAME
+        ):
+            return True
+
+    if message.via_bot:
+        username = message.via_bot.username
+
+        if username and username.lower() == TARGET_BOT_USERNAME:
+            return True
+
+    return False
+
+
+def create_background_task(coro):
+    task = asyncio.create_task(coro)
+    background_tasks.add(task)
+
+    def finished(completed):
+        background_tasks.discard(completed)
+
+        if completed.cancelled():
+            return
+
+        error = completed.exception()
+
+        if error:
+            logger.error(
+                "Ошибка фоновой задачи: %s",
+                error
+            )
+
+    task.add_done_callback(finished)
+
+    return task
+
+
+# ==================================================
+# 3. ОТЧЁТ АДМИНИСТРАЦИИ
+# ==================================================
+
+async def send_admin_report(
+    topic_id,
+    user_id,
+    first_name,
+    username,
+    command_text,
+    command_deleted
+):
+    if not ADMIN_CHAT_ID:
         return
 
-    logger.info(f"Фоновый автопинг запущен для адреса: {RENDER_EXTERNAL_URL}")
-    await asyncio.sleep(10)
+    try:
+        mention = (
+            f'<a href="tg://user?id={user_id}">'
+            f'{escape(first_name)}</a>'
+        )
 
-    async with ClientSession() as session:
-        while True:
-            try:
-                async with session.get(RENDER_EXTERNAL_URL, timeout=10) as response:
-                    logger.info(f"Автопинг выполнен успешно. Статус сервера: {response.status}")
-            except Exception as e:
-                logger.error(f"Ошибка при выполнении автопинга: {e}")
-            await asyncio.sleep(35)
+        username_text = (
+            f" | @{escape(username)}"
+            if username else ""
+        )
 
-# 2. АБСОЛЮТНО ИЗОЛИРОВАННЫЙ КРАТКОСРОЧНЫЙ ПАТРУЛЬ
-async def quick_cleanup(chat_id, topic_id, cmd_msg_id, warn_msg_id, user_id, first_name, username, command_text):
-    await asyncio.sleep(0.5)
-    if ADMIN_CHAT_ID:
-        try:
-            safe_name = first_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            safe_cmd = command_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            
-            mention = f'<a href="tg://user?id={user_id}">{safe_name}</a>'
-            tg_username = f" | @{username}" if username else ""
-            name_of_topic = TOPIC_NAMES.get(topic_id, str(topic_id))
-            
-            if topic_id and topic_id != 0:
-                # Прямая рабочая ссылка на конкретную тему в группе
-                full_url = f"https://t.me/GameFloid/{topic_id}"
-                topic_display = f'<a href="{full_url}">{name_of_topic}</a>'
-            else:
-                topic_display = "<code>Основной чат</code>"
-            
-            report_text = (
-                "🚨 <b>Отчёт о нарушении правил чата</b>\n\n"
-                f"👤 <b>Нарушитель:</b> {mention}{tg_username}\n"
-                f"🆔 <b>ID пользователя:</b> <code>{user_id}</code>\n"
-                f"🏷 <b>Тема нарушения:</b> {topic_display}\n"
-                f"⌨️ <b>Запрещённая команда:</b> <code>{safe_cmd}</code>\n\n"
-                "<i>🗑 Команда пользователя и предупреждение бота успешно зачищены.</i>"
+        topic_name = escape(
+            TOPIC_NAMES.get(
+                topic_id,
+                f"Тема {topic_id}" if topic_id else "Основной чат"
             )
-            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_text, parse_mode="HTML")
-            logger.info(f"Отчёт по пользователю {user_id} успешно отправлен администрации.")
-        except Exception as e:
-            logger.error(f"Не удалось отправить отчёт админам: {e}")
+        )
 
+        report_text = (
+            "🚨 <b>Отчёт о нарушении правил чата</b>\n\n"
+            f"👤 <b>Нарушитель:</b> {mention}{username_text}\n"
+            f"🆔 <b>ID пользователя:</b> "
+            f"<code>{user_id}</code>\n"
+            f"🏷 <b>Тема нарушения:</b> {topic_name}\n"
+            f"⌨️ <b>Запрещённая команда:</b> "
+            f"<code>{escape(command_text)}</code>\n\n"
+            f"🗑 <b>Удаление команды:</b> "
+            f"{'Успешно' if command_deleted else 'Не удалось'}"
+        )
+
+        await bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=report_text,
+            disable_web_page_preview=True
+        )
+
+        logger.info(
+            "Отчёт администрации отправлен. User ID: %s",
+            user_id
+        )
+
+    except TelegramAPIError:
+        logger.exception("Ошибка отправки отчёта администрации")
+
+
+# ==================================================
+# 4. УДАЛЕНИЕ ПРЕДУПРЕЖДЕНИЯ
+# ==================================================
+
+async def cleanup_warning(chat_id, warning_id):
     try:
-        for cycle in range(4):
-            await asyncio.sleep(0.5)
-            for next_id in range(cmd_msg_id + 1, cmd_msg_id + 5):
-                if next_id == warn_msg_id:
-                    continue
-                try:
-                    await bot.delete_message(chat_id=chat_id, message_id=next_id)
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.error(f"Ошибка патруля хвостов: {e}")
+        await asyncio.sleep(WARNING_DELETE_DELAY)
 
-    await asyncio.sleep(10.5)
-    
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=warn_msg_id)
-        logger.info(f"Варн ID {warn_msg_id} успешно удален принудительно.")
-    except Exception as err:
-        logger.error(f"Не удалось принудительно удалить варн {warn_msg_id}: {err}")
+        await bot.delete_message(
+            chat_id=chat_id,
+            message_id=warning_id
+        )
 
-# 3. ОБЩИЙ ХЕНДЛЕР ДЛЯ МОДЕРАЦИИ
+        logger.info(
+            "Предупреждение %s удалено",
+            warning_id
+        )
+
+    except asyncio.CancelledError:
+        raise
+
+    except TelegramAPIError:
+        logger.exception(
+            "Не удалось удалить предупреждение %s",
+            warning_id
+        )
+
+
+# ==================================================
+# 5. МОДЕРАЦИЯ ЧАТА
+# ==================================================
+
 @dp.message()
 async def moderate_chat(message: Message):
+
+    # Не модерируем административный чат.
     if ADMIN_CHAT_ID and message.chat.id == ADMIN_CHAT_ID:
         return
 
-    current_topic = message.message_thread_id if message.message_thread_id else 0
+    current_topic = message.message_thread_id or 0
 
+    # Разрешённая тема.
     if current_topic == ALLOWED_TOPIC_ID:
         return
 
-    is_target_bot = False
-    if message.from_user:
-        if message.from_user.is_bot:
-            is_target_bot = True
-        elif message.from_user.username and message.from_user.username.lower() == "brassgay":
-            is_target_bot = True
+    # Удаляем только BR Assistant.
+    if is_target_bot_message(message):
 
-    if message.via_bot and message.via_bot.username and message.via_bot.username.lower() == "brassgay":
-        is_target_bot = True
-
-    if is_target_bot:
         try:
             await message.delete()
-            logger.info(f"Мгновенно удалено входящее сообщение BR Assistant в теме {current_topic}")
-        except Exception:
-            pass
+
+            logger.info(
+                "Удалено сообщение BR Assistant. Тема: %s",
+                current_topic
+            )
+
+        except TelegramAPIError:
+            logger.exception(
+                "Не удалось удалить сообщение BR Assistant"
+            )
+
         return
 
-    if message.text:
-        text = message.text.lower().strip()
+    # Не трогаем остальных ботов.
+    if message.from_user and message.from_user.is_bot:
+        return
 
-        if text.startswith(TARGET_COMMANDS):
-            try:
-                command_msg_id = message.message_id
-                chat_id = message.chat.id
+    # Не модерируем сообщения собственного бота.
+    if message.from_user and message.from_user.id == BOT_ID:
+        return
 
-                safe_first_name = message.from_user.first_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                user_mention = f'<a href="tg://user?id={message.from_user.id}">{safe_first_name}</a>'
-                
-                warning_text = (
-                    f"⚠️ {user_mention}, использовать команды бота <b>BR Assistant</b>\n"
-                    f'можно строго в теме <b><a href="{CHAT_LINK}">Чат для общения</a></b>!'
-                )
+    # Проверяем текст.
+    if not message.text:
+        return
 
-                # Отправляем варн, явно передавая ID текущей темы
-                warn_msg = await bot.send_message(
-                    chat_id=chat_id,
-                    text=warning_text,
-                    message_thread_id=current_topic if current_topic != 0 else None,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True
-                )
-                warn_msg_id = warn_msg.message_id
+    if not is_target_command(message.text):
+        return
 
-                # Удаляем команду нарушителя
-                await message.delete()
-                logger.info(f"Мгновенно стерта команда пользователя {command_msg_id}")
+    if not message.from_user:
+        return
 
-                asyncio.create_task(
-                    quick_cleanup(
-                        chat_id=chat_id, topic_id=current_topic, cmd_msg_id=command_msg_id,
-                        warn_msg_id=warn_msg_id, user_id=message.from_user.id,
-                        first_name=message.from_user.first_name, username=message.from_user.username,
-                        command_text=message.text
-                    )
-                )
-            except Exception as e:
-                logger.error(f"Ошибка в процессе изолированной модерации: {e}")
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name or "Пользователь"
+    username = message.from_user.username
 
-# 4. ОБРАБОТЧИК ВЕБХУКОВ И ЗАПУСК
-async def handle_webhook(request):
-    if request.method == "GET":
-        return web.Response(text="Сервер активен, функция автопинга работает.", status=200)
+    chat_id = message.chat.id
+    command_text = message.text
+
+    logger.info(
+        "Запрещённая команда обнаружена: %s, пользователь: %s",
+        command_text,
+        user_id
+    )
+
+    # Создаём предупреждение.
+    warning_text = (
+        f"⚠️ <a href=\"tg://user?id={user_id}\">"
+        f"{escape(first_name)}</a>, использовать команды бота "
+        f"<b>BR Assistant</b>\n"
+        f'можно строго в теме '
+        f'<b><a href="{escape(CHAT_LINK)}">'
+        f'Чат для общения</a></b>!'
+    )
+
+    warning_id = None
+
     try:
-        if not request.can_read_body:
-            return web.Response(text="Empty body", status=400)
+        warning = await bot.send_message(
+            chat_id=chat_id,
+            text=warning_text,
+            message_thread_id=(
+                current_topic if current_topic else None
+            ),
+            disable_web_page_preview=True
+        )
+
+        warning_id = warning.message_id
+
+    except TelegramAPIError:
+        logger.exception("Не удалось отправить предупреждение")
+
+    # Удаляем только команду нарушителя.
+    command_deleted = False
+
+    try:
+        await message.delete()
+        command_deleted = True
+
+        logger.info(
+            "Команда %s удалена",
+            message.message_id
+        )
+
+    except TelegramAPIError:
+        logger.exception("Не удалось удалить команду")
+
+    # Отправляем отчёт администрации.
+    await send_admin_report(
+        topic_id=current_topic,
+        user_id=user_id,
+        first_name=first_name,
+        username=username,
+        command_text=command_text,
+        command_deleted=command_deleted
+    )
+
+    # Удаляем предупреждение через 12 секунд.
+    if warning_id is not None:
+        create_background_task(
+            cleanup_warning(chat_id, warning_id)
+        )
+
+
+# ==================================================
+# 6. HEALTH CHECK
+# ==================================================
+
+async def healthcheck(request):
+    return web.Response(
+        text="Telegram bot server is running",
+        status=200
+    )
+
+
+# ==================================================
+# 7. TELEGRAM WEBHOOK
+# ==================================================
+
+async def handle_webhook(request):
+
+    received_secret = request.headers.get(
+        "X-Telegram-Bot-Api-Secret-Token",
+        ""
+    )
+
+    if not hmac.compare_digest(
+        received_secret,
+        WEBHOOK_SECRET
+    ):
+        logger.warning("Неверный секрет вебхука")
+
+        return web.Response(
+            text="Forbidden",
+            status=403
+        )
+
+    try:
         json_data = await request.json()
-        telegram_update = Update(**json_data)
-        await dp.feed_update(bot, telegram_update)
-        return web.Response(text="ok", status=200)
-    except Exception as e:
-        logger.error(f"Ошибка вебхука: {e}")
-        return web.Response(text="error", status=400)
+
+        telegram_update = Update.model_validate(
+            json_data,
+            context={"bot": bot}
+        )
+
+    except (ValueError, TypeError, json.JSONDecodeError):
+        logger.exception("Некорректный JSON вебхука")
+
+        return web.Response(
+            text="Bad Request",
+            status=400
+        )
+
+    try:
+        await dp.feed_update(
+            bot,
+            telegram_update
+        )
+
+        return web.Response(
+            text="ok",
+            status=200
+        )
+
+    except Exception:
+        logger.exception("Ошибка обработки Telegram Update")
+
+        return web.Response(
+            text="Internal Server Error",
+            status=500
+        )
+
+
+# ==================================================
+# 8. ЗАПУСК СЕРВЕРА
+# ==================================================
 
 async def main_async():
-    app = web.Application()
+
+    global BOT_ID
+
+    runner = web.AppRunner(
+        web.Application()
+    )
+
+    app = runner.app
+
+    app.router.add_get("/", healthcheck)
     app.router.add_post("/", handle_webhook)
-    app.router.add_get("/", handle_webhook)
 
-    runner = web.AppRunner(app)
-    await runner.setup()
+    try:
+        # Получаем информацию о боте один раз.
+        bot_info = await bot.get_me()
 
-    port = int(os.getenv("PORT", "10000"))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+        BOT_ID = bot_info.id
 
-    if RENDER_EXTERNAL_URL:
-        await bot.set_webhook(url=RENDER_EXTERNAL_URL, drop_pending_updates=True)
-        logger.info(f"Вебхук установлен на: {RENDER_EXTERNAL_URL}")
+        logger.info(
+            "Бот запущен: @%s, ID: %s",
+            bot_info.username,
+            BOT_ID
+        )
 
-    asyncio.create_task(keep_alive())
+        await runner.setup()
 
-    while True:
-        await asyncio.sleep(3600)
+        site = web.TCPSite(
+            runner,
+            host="0.0.0.0",
+            port=PORT
+        )
+
+        await site.start()
+
+        logger.info(
+            "HTTP-сервер запущен на порту %s",
+            PORT
+        )
+
+        # Устанавливаем защищённый webhook.
+        await bot.set_webhook(
+            url=RENDER_EXTERNAL_URL,
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=False
+        )
+
+        logger.info("Telegram Webhook успешно установлен")
+
+        # Сервер работает до остановки процесса.
+        await asyncio.Event().wait()
+
+    finally:
+        logger.info("Остановка бота")
+
+        for task in list(background_tasks):
+            task.cancel()
+
+        for task in list(background_tasks):
+            with suppress(asyncio.CancelledError):
+                await task
+
+        await runner.cleanup()
+        await bot.session.close()
+
+        logger.info("Бот остановлен")
+
+
+# ==================================================
+# 9. ТОЧКА ВХОДА
+# ==================================================
 
 if __name__ == "__main__":
+
     try:
         asyncio.run(main_async())
+
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот остановлен.")
+        logger.info("Работа завершена")
