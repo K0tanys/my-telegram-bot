@@ -2,7 +2,6 @@
 import asyncio
 import html
 import hmac
-import json
 import logging
 import os
 import re
@@ -34,19 +33,24 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+RENDER_EXTERNAL_URL = os.getenv(
+    "RENDER_EXTERNAL_URL", ""
+).rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 PORT = int(os.getenv("PORT", "10000"))
 
+# Настройки модерации
 ALLOWED_TOPIC_ID = 18600
 TARGET_BOT_USERNAME = "brassgay"
 WARNING_DELETE_DELAY = 12
 
-# Обязательная подписка
+# Настройки TendorX
+# Обязательная подписка временно отключена.
 TARGET_GROUP_USERNAME = "gamefloid"
 TARGET_GROUP_ID = int(os.getenv("TARGET_GROUP_ID", "0"))
 
@@ -57,12 +61,16 @@ SUBSCRIPTION_PROMPT_COOLDOWN = 60
 
 # Защита от повторных обновлений
 MAX_PROCESSED_UPDATES = 5000
+
 processed_update_ids = set()
 processed_update_order = deque()
 pending_update_ids = set()
+
 update_lock = asyncio.Lock()
 
+# Фоновые задачи
 background_tasks = set()
+
 BOT_ID = None
 
 # Защита от повторных уведомлений
@@ -75,13 +83,17 @@ if not RENDER_EXTERNAL_URL.startswith("https://"):
     raise RuntimeError("Неверный RENDER_EXTERNAL_URL")
 
 if not WEBHOOK_SECRET or not re.fullmatch(
-    r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET
+    r"[A-Za-z0-9_-]{1,256}",
+    WEBHOOK_SECRET
 ):
     raise RuntimeError("Неверный WEBHOOK_SECRET")
 
+
 bot = Bot(
     token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
+    )
 )
 
 dp = Dispatcher()
@@ -96,18 +108,21 @@ def escape(value):
 
 
 def normalize_commands(commands):
+
     if isinstance(commands, str):
         commands = (commands,)
 
     result = set()
 
     for item in commands:
+
         command = str(item).strip().lower()
 
         if not command:
             continue
 
         command = command.lstrip("/")
+
         result.add(command)
         result.add("/" + command)
 
@@ -118,36 +133,45 @@ TARGET_COMMAND_SET = normalize_commands(TARGET_COMMANDS)
 
 
 def is_target_command(text):
+
     if not text or not text.strip():
         return False
 
     first_part = text.strip().split(maxsplit=1)[0]
+
     command = first_part.split("@", 1)[0].lower()
 
     return command in TARGET_COMMAND_SET
 
 
 def is_target_bot_message(message: Message):
+
     if message.from_user:
+
         username = message.from_user.username
 
         if (
             message.from_user.is_bot
             and username
-            and username.lower() == TARGET_BOT_USERNAME
+            and username.lower() == TARGET_BOT_USERNAME.lower()
         ):
             return True
 
     if message.via_bot:
+
         username = message.via_bot.username
 
-        if username and username.lower() == TARGET_BOT_USERNAME:
+        if (
+            username
+            and username.lower() == TARGET_BOT_USERNAME.lower()
+        ):
             return True
 
     return False
 
 
 def is_target_group(message: Message) -> bool:
+
     if TARGET_GROUP_ID:
         return message.chat.id == TARGET_GROUP_ID
 
@@ -160,8 +184,14 @@ def is_target_group(message: Message) -> bool:
 # 3. ПРОВЕРКА ПОДПИСКИ TENDORX
 # ==================================================
 
+# Функции сохранены для будущего использования.
+# Автоматическая проверка подписки отключена.
+
+
 async def is_subscribed(user_id: int):
+
     try:
+
         member = await bot.get_chat_member(
             chat_id=TENDORX_CHANNEL,
             user_id=user_id
@@ -183,14 +213,17 @@ async def is_subscribed(user_id: int):
         return False
 
     except TelegramAPIError:
+
         logger.exception(
             "Ошибка проверки подписки пользователя %s",
             user_id
         )
+
         return None
 
 
 def subscription_keyboard(chat_id: int, user_id: int):
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -218,21 +251,22 @@ async def ask_to_subscribe(message: Message):
     chat_id = message.chat.id
 
     now = time.monotonic()
+
     key = (chat_id, user_id)
 
     last_prompt = subscription_prompt_times.get(key, 0)
 
-    # Удаляем сообщение неподписанного пользователя
     try:
+
         await message.delete()
 
     except TelegramAPIError:
+
         logger.exception(
             "Не удалось удалить сообщение пользователя %s",
             user_id
         )
 
-    # Не отправляем одинаковые уведомления слишком часто
     if now - last_prompt < SUBSCRIPTION_PROMPT_COOLDOWN:
         return
 
@@ -271,6 +305,7 @@ async def ask_to_subscribe(message: Message):
     )
 
     try:
+
         await bot.send_message(
             chat_id=chat_id,
             text=text,
@@ -283,6 +318,7 @@ async def ask_to_subscribe(message: Message):
         )
 
     except TelegramAPIError:
+
         logger.exception(
             "Не удалось отправить сообщение о подписке"
         )
@@ -295,6 +331,7 @@ async def ask_to_subscribe(message: Message):
 def create_background_task(coro):
 
     task = asyncio.create_task(coro)
+
     background_tasks.add(task)
 
     def finished(completed):
@@ -307,6 +344,7 @@ def create_background_task(coro):
         error = completed.exception()
 
         if error:
+
             logger.error(
                 "Ошибка фоновой задачи: %s",
                 error
@@ -373,6 +411,7 @@ async def send_admin_report(
             )
 
         else:
+
             topic_display = topic_name
 
         report_text = (
@@ -399,6 +438,7 @@ async def send_admin_report(
         )
 
     except TelegramAPIError:
+
         logger.exception(
             "Ошибка отправки отчёта администрации"
         )
@@ -425,9 +465,11 @@ async def cleanup_warning(chat_id, warning_id):
         )
 
     except asyncio.CancelledError:
+
         raise
 
     except TelegramAPIError:
+
         logger.exception(
             "Не удалось удалить предупреждение %s",
             warning_id
@@ -437,6 +479,9 @@ async def cleanup_warning(chat_id, warning_id):
 # ==================================================
 # 7. КНОПКА ПРОВЕРКИ ПОДПИСКИ
 # ==================================================
+
+# Обработчик оставлен на будущее.
+# Автоматически пользователям кнопка не отправляется.
 
 @dp.callback_query(
     lambda c: c.data and c.data.startswith("subcheck:")
@@ -454,11 +499,22 @@ async def check_subscription_callback(
         chat_id = int(chat_id_text)
         user_id = int(user_id_text)
 
-        # Проверяем, что кнопку нажал именно её владелец
         if callback.from_user.id != user_id:
 
             await callback.answer(
                 "Эта кнопка предназначена другому пользователю.",
+                show_alert=True
+            )
+
+            return
+
+        if (
+            callback.message
+            and callback.message.chat.id != chat_id
+        ):
+
+            await callback.answer(
+                "Некорректный запрос.",
                 show_alert=True
             )
 
@@ -500,6 +556,7 @@ async def check_subscription_callback(
                 )
 
             except TelegramAPIError:
+
                 logger.exception(
                     "Не удалось обновить сообщение проверки"
                 )
@@ -559,69 +616,21 @@ async def moderate_chat(message: Message):
     if ADMIN_CHAT_ID and message.chat.id == ADMIN_CHAT_ID:
         return
 
-    # Ботов не проверяем на подписку
-    if message.from_user and message.from_user.is_bot:
-
-        if message.from_user.id == BOT_ID:
-            return
+    # Не модерируем сообщения собственного бота
+    if (
+        message.from_user
+        and message.from_user.id == BOT_ID
+    ):
+        return
 
     # ------------------------------------------------
     # ОБЯЗАТЕЛЬНАЯ ПОДПИСКА TENDORX
+    # ВРЕМЕННО ПОЛНОСТЬЮ ОТКЛЮЧЕНА
     # ------------------------------------------------
 
-    if is_target_group(message) and message.from_user:
-
-        user_id = message.from_user.id
-
-        try:
-
-            group_member = await bot.get_chat_member(
-                chat_id=message.chat.id,
-                user_id=user_id
-            )
-
-        except TelegramAPIError:
-
-            logger.exception(
-                "Не удалось получить статус пользователя %s",
-                user_id
-            )
-
-            group_member = None
-
-        # Администраторы и создатель группы освобождены
-        if (
-            group_member
-            and group_member.status in (
-                "administrator",
-                "creator"
-            )
-        ):
-            pass
-
-        elif group_member is not None:
-
-            subscribed = await is_subscribed(user_id)
-
-            if subscribed is False:
-
-                logger.info(
-                    "Сообщение пользователя %s удаляется: "
-                    "нет подписки TendorX",
-                    user_id
-                )
-
-                await ask_to_subscribe(message)
-
-                return
-
-            if subscribed is None:
-
-                logger.warning(
-                    "Проверка TendorX временно недоступна "
-                    "для пользователя %s",
-                    user_id
-                )
+    # Проверка подписки не выполняется.
+    # Сообщения пользователей не удаляются из-за подписки.
+    # Уведомления о подписке не отправляются.
 
     # ------------------------------------------------
     # СТАРАЯ МОДЕРАЦИЯ
@@ -646,6 +655,7 @@ async def moderate_chat(message: Message):
             )
 
         except TelegramAPIError:
+
             logger.exception(
                 "Не удалось удалить сообщение BR Assistant"
             )
@@ -656,20 +666,25 @@ async def moderate_chat(message: Message):
     if message.from_user and message.from_user.is_bot:
         return
 
-    # Не модерируем сообщения собственного бота
-    if message.from_user and message.from_user.id == BOT_ID:
+    if not message.text:
         return
 
-    if not message.text or not is_target_command(message.text):
+    if not is_target_command(message.text):
         return
 
     if not message.from_user:
         return
 
     user_id = message.from_user.id
-    first_name = message.from_user.first_name or "Пользователь"
+
+    first_name = (
+        message.from_user.first_name or "Пользователь"
+    )
+
     username = message.from_user.username
+
     chat_id = message.chat.id
+
     command_text = message.text
 
     logger.info(
@@ -689,6 +704,7 @@ async def moderate_chat(message: Message):
 
     warning_id = None
 
+    # Отправляем предупреждение
     try:
 
         warning = await bot.send_message(
@@ -703,10 +719,12 @@ async def moderate_chat(message: Message):
         warning_id = warning.message_id
 
     except TelegramAPIError:
+
         logger.exception(
             "Не удалось отправить предупреждение"
         )
 
+    # Удаляем запрещённую команду
     command_deleted = False
 
     try:
@@ -721,10 +739,12 @@ async def moderate_chat(message: Message):
         )
 
     except TelegramAPIError:
+
         logger.exception(
             "Не удалось удалить команду"
         )
 
+    # Отправляем отчёт администрации
     await send_admin_report(
         topic_id=current_topic,
         user_id=user_id,
@@ -734,6 +754,7 @@ async def moderate_chat(message: Message):
         command_deleted=command_deleted
     )
 
+    # Удаляем предупреждение через 12 секунд
     if warning_id is not None:
 
         create_background_task(
@@ -778,7 +799,10 @@ async def finish_update(update_id, success):
 
         pending_update_ids.discard(update_id)
 
-        if not success or update_id in processed_update_ids:
+        if (
+            not success
+            or update_id in processed_update_ids
+        ):
             return
 
         if len(processed_update_order) >= MAX_PROCESSED_UPDATES:
@@ -788,6 +812,7 @@ async def finish_update(update_id, success):
             processed_update_ids.discard(oldest)
 
         processed_update_order.append(update_id)
+
         processed_update_ids.add(update_id)
 
 
@@ -825,10 +850,10 @@ async def handle_webhook(request):
             context={"bot": bot}
         )
 
-    except (ValueError, TypeError, json.JSONDecodeError):
+    except Exception:
 
         logger.exception(
-            "Некорректный JSON вебхука"
+            "Некорректный JSON или структура вебхука"
         )
 
         return web.Response(
@@ -981,6 +1006,7 @@ async def main_async():
                 await task
 
         await runner.cleanup()
+
         await bot.session.close()
 
         logger.info(
