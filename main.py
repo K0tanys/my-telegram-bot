@@ -12,7 +12,7 @@ from contextlib import suppress
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     Message,
@@ -38,43 +38,70 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+
 RENDER_EXTERNAL_URL = os.getenv(
     "RENDER_EXTERNAL_URL", ""
 ).rstrip("/")
+
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 PORT = int(os.getenv("PORT", "10000"))
 
+
 # Настройки модерации
+
 ALLOWED_TOPIC_ID = 18600
+
 TARGET_BOT_USERNAME = "brassgay"
+
 WARNING_DELETE_DELAY = 12
 
-# Настройки TendorX
-# Обязательная подписка временно отключена.
+
+# Целевая группа GameFloid
+
 TARGET_GROUP_USERNAME = "gamefloid"
-TARGET_GROUP_ID = int(os.getenv("TARGET_GROUP_ID", "0"))
+
+TARGET_GROUP_ID = int(
+    os.getenv("TARGET_GROUP_ID", "0")
+)
+
+
+# Настройки TendorX
+
+# Автоматическая проверка подписки отключена.
 
 TENDORX_CHANNEL = "@TendorX"
+
 TENDORX_CHANNEL_LINK = "https://t.me/TendorX"
 
 SUBSCRIPTION_PROMPT_COOLDOWN = 60
 
+
 # Защита от повторных обновлений
+
 MAX_PROCESSED_UPDATES = 5000
 
 processed_update_ids = set()
+
 processed_update_order = deque()
+
 pending_update_ids = set()
 
 update_lock = asyncio.Lock()
 
+
 # Фоновые задачи
+
 background_tasks = set()
 
 BOT_ID = None
 
+
 # Защита от повторных уведомлений
+
 subscription_prompt_times = {}
+
+
+# Проверка настроек
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN")
@@ -104,7 +131,11 @@ dp = Dispatcher()
 # ==================================================
 
 def escape(value):
-    return html.escape(str(value or ""), quote=True)
+
+    return html.escape(
+        str(value or ""),
+        quote=True
+    )
 
 
 def normalize_commands(commands):
@@ -124,12 +155,15 @@ def normalize_commands(commands):
         command = command.lstrip("/")
 
         result.add(command)
+
         result.add("/" + command)
 
     return result
 
 
-TARGET_COMMAND_SET = normalize_commands(TARGET_COMMANDS)
+TARGET_COMMAND_SET = normalize_commands(
+    TARGET_COMMANDS
+)
 
 
 def is_target_command(text):
@@ -137,9 +171,14 @@ def is_target_command(text):
     if not text or not text.strip():
         return False
 
-    first_part = text.strip().split(maxsplit=1)[0]
+    first_part = text.strip().split(
+        maxsplit=1
+    )[0]
 
-    command = first_part.split("@", 1)[0].lower()
+    command = first_part.split(
+        "@",
+        1
+    )[0].lower()
 
     return command in TARGET_COMMAND_SET
 
@@ -153,7 +192,8 @@ def is_target_bot_message(message: Message):
         if (
             message.from_user.is_bot
             and username
-            and username.lower() == TARGET_BOT_USERNAME.lower()
+            and username.lower()
+            == TARGET_BOT_USERNAME.lower()
         ):
             return True
 
@@ -163,7 +203,8 @@ def is_target_bot_message(message: Message):
 
         if (
             username
-            and username.lower() == TARGET_BOT_USERNAME.lower()
+            and username.lower()
+            == TARGET_BOT_USERNAME.lower()
         ):
             return True
 
@@ -172,20 +213,33 @@ def is_target_bot_message(message: Message):
 
 def is_target_group(message: Message) -> bool:
 
+    # Модерация разрешена только в группах
+    if message.chat.type not in (
+        ChatType.GROUP,
+        ChatType.SUPERGROUP
+    ):
+        return False
+
+    # Если задан ID группы, проверяем строго его
     if TARGET_GROUP_ID:
+
         return message.chat.id == TARGET_GROUP_ID
 
+    # Резервная проверка по username
     username = message.chat.username or ""
 
-    return username.lower() == TARGET_GROUP_USERNAME.lower()
+    return (
+        username.lower()
+        == TARGET_GROUP_USERNAME.lower()
+    )
 
 
 # ==================================================
 # 3. ПРОВЕРКА ПОДПИСКИ TENDORX
 # ==================================================
 
-# Функции сохранены для будущего использования.
 # Автоматическая проверка подписки отключена.
+# Функции оставлены для будущего использования.
 
 
 async def is_subscribed(user_id: int):
@@ -222,7 +276,10 @@ async def is_subscribed(user_id: int):
         return None
 
 
-def subscription_keyboard(chat_id: int, user_id: int):
+def subscription_keyboard(
+    chat_id: int,
+    user_id: int
+):
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -235,7 +292,9 @@ def subscription_keyboard(chat_id: int, user_id: int):
             [
                 InlineKeyboardButton(
                     text="Проверить подписку",
-                    callback_data=f"subcheck:{chat_id}:{user_id}"
+                    callback_data=(
+                        f"subcheck:{chat_id}:{user_id}"
+                    )
                 )
             ]
         ]
@@ -248,13 +307,17 @@ async def ask_to_subscribe(message: Message):
         return
 
     user_id = message.from_user.id
+
     chat_id = message.chat.id
 
     now = time.monotonic()
 
     key = (chat_id, user_id)
 
-    last_prompt = subscription_prompt_times.get(key, 0)
+    last_prompt = subscription_prompt_times.get(
+        key,
+        0
+    )
 
     try:
 
@@ -267,14 +330,19 @@ async def ask_to_subscribe(message: Message):
             user_id
         )
 
-    if now - last_prompt < SUBSCRIPTION_PROMPT_COOLDOWN:
+    if (
+        now - last_prompt
+        < SUBSCRIPTION_PROMPT_COOLDOWN
+    ):
         return
 
     subscription_prompt_times[key] = now
 
     if len(subscription_prompt_times) > 10000:
 
-        cutoff = now - SUBSCRIPTION_PROMPT_COOLDOWN * 2
+        cutoff = (
+            now - SUBSCRIPTION_PROMPT_COOLDOWN * 2
+        )
 
         stale_keys = [
             stored_key
@@ -284,10 +352,15 @@ async def ask_to_subscribe(message: Message):
         ]
 
         for stored_key in stale_keys:
-            subscription_prompt_times.pop(stored_key, None)
+
+            subscription_prompt_times.pop(
+                stored_key,
+                None
+            )
 
     first_name = escape(
-        message.from_user.first_name or "Пользователь"
+        message.from_user.first_name
+        or "Пользователь"
     )
 
     user_mention = (
@@ -296,12 +369,15 @@ async def ask_to_subscribe(message: Message):
     )
 
     text = (
-        f"👋 {user_mention}, чтобы писать в сообществе GameFloid, "
-        "необходимо подписаться на официальный канал TendorX.\n\n"
+        f"👋 {user_mention}, чтобы писать "
+        "в сообществе GameFloid, "
+        "необходимо подписаться "
+        "на официальный канал TendorX.\n\n"
         "1. Нажмите «Подписаться на TendorX».\n"
         "2. Вернитесь сюда.\n"
         "3. Нажмите «Проверить подписку».\n\n"
-        "После подтверждения подписки ваши сообщения будут доступны."
+        "После подтверждения подписки "
+        "ваши сообщения будут доступны."
     )
 
     try:
@@ -360,7 +436,10 @@ def get_topic_link(topic_id):
     if not topic_id:
         return None
 
-    base_url = CHAT_LINK.rstrip("/").rsplit("/", 1)[0]
+    base_url = (
+        CHAT_LINK.rstrip("/")
+        .rsplit("/", 1)[0]
+    )
 
     return f"{base_url}/{topic_id}"
 
@@ -390,14 +469,16 @@ async def send_admin_report(
 
         username_text = (
             f" | @{escape(username)}"
-            if username else ""
+            if username
+            else ""
         )
 
         topic_name = escape(
             TOPIC_NAMES.get(
                 topic_id,
                 f"Тема {topic_id}"
-                if topic_id else "Основной чат"
+                if topic_id
+                else "Основной чат"
             )
         )
 
@@ -416,10 +497,12 @@ async def send_admin_report(
 
         report_text = (
             "🚨 <b>Отчёт о нарушении правил чата</b>\n\n"
-            f"👤 <b>Нарушитель:</b> {mention}{username_text}\n"
+            f"👤 <b>Нарушитель:</b> "
+            f"{mention}{username_text}\n"
             f"🆔 <b>ID пользователя:</b> "
             f"<code>{user_id}</code>\n"
-            f"🏷 <b>Тема нарушения:</b> {topic_display}\n"
+            f"🏷 <b>Тема нарушения:</b> "
+            f"{topic_display}\n"
             f"⌨️ <b>Запрещённая команда:</b> "
             f"<code>{escape(command_text)}</code>\n\n"
             f"🗑 <b>Удаление команды:</b> "
@@ -448,11 +531,16 @@ async def send_admin_report(
 # 6. УДАЛЕНИЕ ПРЕДУПРЕЖДЕНИЯ
 # ==================================================
 
-async def cleanup_warning(chat_id, warning_id):
+async def cleanup_warning(
+    chat_id,
+    warning_id
+):
 
     try:
 
-        await asyncio.sleep(WARNING_DELETE_DELAY)
+        await asyncio.sleep(
+            WARNING_DELETE_DELAY
+        )
 
         await bot.delete_message(
             chat_id=chat_id,
@@ -480,11 +568,11 @@ async def cleanup_warning(chat_id, warning_id):
 # 7. КНОПКА ПРОВЕРКИ ПОДПИСКИ
 # ==================================================
 
-# Обработчик оставлен на будущее.
-# Автоматически пользователям кнопка не отправляется.
-
 @dp.callback_query(
-    lambda c: c.data and c.data.startswith("subcheck:")
+    lambda c: (
+        c.data
+        and c.data.startswith("subcheck:")
+    )
 )
 async def check_subscription_callback(
     callback: CallbackQuery
@@ -497,6 +585,7 @@ async def check_subscription_callback(
         )
 
         chat_id = int(chat_id_text)
+
         user_id = int(user_id_text)
 
         if callback.from_user.id != user_id:
@@ -520,7 +609,9 @@ async def check_subscription_callback(
 
             return
 
-        subscribed = await is_subscribed(user_id)
+        subscribed = await is_subscribed(
+            user_id
+        )
 
         if subscribed is None:
 
@@ -612,20 +703,43 @@ async def check_subscription_callback(
 @dp.message()
 async def moderate_chat(message: Message):
 
-    # Не модерируем административный чат
-    if ADMIN_CHAT_ID and message.chat.id == ADMIN_CHAT_ID:
+    # ------------------------------------------------
+    # 1. ЗАЩИТА АДМИНИСТРАТИВНОГО ЧАТА
+    # ------------------------------------------------
+
+    if (
+        ADMIN_CHAT_ID
+        and message.chat.id == ADMIN_CHAT_ID
+    ):
+
         return
 
-    # Не модерируем сообщения собственного бота
+    # ------------------------------------------------
+    # 2. ГЛАВНАЯ ЗАЩИТА
+    #
+    # МОДЕРАЦИЯ РАБОТАЕТ ТОЛЬКО В GAMEFLOID.
+    #
+    # Все остальные группы и личные чаты
+    # полностью исключаются из обработки.
+    # ------------------------------------------------
+
+    if not is_target_group(message):
+
+        return
+
+    # ------------------------------------------------
+    # 3. НЕ ТРОГАЕМ СОБСТВЕННОГО БОТА
+    # ------------------------------------------------
+
     if (
         message.from_user
         and message.from_user.id == BOT_ID
     ):
+
         return
 
     # ------------------------------------------------
-    # ОБЯЗАТЕЛЬНАЯ ПОДПИСКА TENDORX
-    # ВРЕМЕННО ПОЛНОСТЬЮ ОТКЛЮЧЕНА
+    # 4. ОТКЛЮЧЕННАЯ ПРОВЕРКА ПОДПИСКИ TENDORX
     # ------------------------------------------------
 
     # Проверка подписки не выполняется.
@@ -633,16 +747,27 @@ async def moderate_chat(message: Message):
     # Уведомления о подписке не отправляются.
 
     # ------------------------------------------------
-    # СТАРАЯ МОДЕРАЦИЯ
+    # 5. ПОЛУЧАЕМ ID ТЕМЫ
     # ------------------------------------------------
 
-    current_topic = message.message_thread_id or 0
+    current_topic = (
+        message.message_thread_id or 0
+    )
 
-    # Разрешённая тема
+    # ------------------------------------------------
+    # 6. РАЗРЕШЁННАЯ ТЕМА
+    #
+    # В этой теме бот вообще ничего не удаляет.
+    # ------------------------------------------------
+
     if current_topic == ALLOWED_TOPIC_ID:
+
         return
 
-    # Удаляем только BR Assistant
+    # ------------------------------------------------
+    # 7. УДАЛЯЕМ ТОЛЬКО BR ASSISTANT
+    # ------------------------------------------------
+
     if is_target_bot_message(message):
 
         try:
@@ -650,7 +775,9 @@ async def moderate_chat(message: Message):
             await message.delete()
 
             logger.info(
-                "Удалено сообщение BR Assistant. Тема: %s",
+                "Удалено сообщение BR Assistant. "
+                "Группа: %s, тема: %s",
+                message.chat.id,
                 current_topic
             )
 
@@ -662,23 +789,46 @@ async def moderate_chat(message: Message):
 
         return
 
-    # Других ботов не трогаем
-    if message.from_user and message.from_user.is_bot:
+    # ------------------------------------------------
+    # 8. ДРУГИХ БОТОВ НЕ ТРОГАЕМ
+    # ------------------------------------------------
+
+    if (
+        message.from_user
+        and message.from_user.is_bot
+    ):
+
         return
+
+    # ------------------------------------------------
+    # 9. ПРОВЕРЯЕМ НАЛИЧИЕ ТЕКСТА
+    # ------------------------------------------------
 
     if not message.text:
+
         return
 
+    # ------------------------------------------------
+    # 10. ПРОВЕРЯЕМ ЗАПРЕЩЁННЫЕ КОМАНДЫ
+    # ------------------------------------------------
+
     if not is_target_command(message.text):
+
         return
 
     if not message.from_user:
+
         return
+
+    # ------------------------------------------------
+    # 11. СОБИРАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ
+    # ------------------------------------------------
 
     user_id = message.from_user.id
 
     first_name = (
-        message.from_user.first_name or "Пользователь"
+        message.from_user.first_name
+        or "Пользователь"
     )
 
     username = message.from_user.username
@@ -693,10 +843,15 @@ async def moderate_chat(message: Message):
         user_id
     )
 
+    # ------------------------------------------------
+    # 12. ТЕКСТ ПРЕДУПРЕЖДЕНИЯ
+    # ------------------------------------------------
+
     warning_text = (
         f'⚠️ <a href="tg://user?id={user_id}">'
         f'{escape(first_name)}</a>, '
-        f'использовать команды бота <b>BR Assistant</b>\n'
+        f'использовать команды бота '
+        f'<b>BR Assistant</b>\n'
         f'можно строго в теме '
         f'<b><a href="{escape(CHAT_LINK)}">'
         f'Чат для общения</a></b>!'
@@ -704,14 +859,19 @@ async def moderate_chat(message: Message):
 
     warning_id = None
 
-    # Отправляем предупреждение
+    # ------------------------------------------------
+    # 13. ОТПРАВЛЯЕМ ПРЕДУПРЕЖДЕНИЕ
+    # ------------------------------------------------
+
     try:
 
         warning = await bot.send_message(
             chat_id=chat_id,
             text=warning_text,
             message_thread_id=(
-                current_topic if current_topic else None
+                current_topic
+                if current_topic
+                else None
             ),
             disable_web_page_preview=True
         )
@@ -724,7 +884,10 @@ async def moderate_chat(message: Message):
             "Не удалось отправить предупреждение"
         )
 
-    # Удаляем запрещённую команду
+    # ------------------------------------------------
+    # 14. УДАЛЯЕМ ЗАПРЕЩЁННУЮ КОМАНДУ
+    # ------------------------------------------------
+
     command_deleted = False
 
     try:
@@ -744,7 +907,10 @@ async def moderate_chat(message: Message):
             "Не удалось удалить команду"
         )
 
-    # Отправляем отчёт администрации
+    # ------------------------------------------------
+    # 15. ОТПРАВЛЯЕМ ОТЧЁТ АДМИНИСТРАЦИИ
+    # ------------------------------------------------
+
     await send_admin_report(
         topic_id=current_topic,
         user_id=user_id,
@@ -754,11 +920,17 @@ async def moderate_chat(message: Message):
         command_deleted=command_deleted
     )
 
-    # Удаляем предупреждение через 12 секунд
+    # ------------------------------------------------
+    # 16. УДАЛЯЕМ ПРЕДУПРЕЖДЕНИЕ ЧЕРЕЗ 12 СЕКУНД
+    # ------------------------------------------------
+
     if warning_id is not None:
 
         create_background_task(
-            cleanup_warning(chat_id, warning_id)
+            cleanup_warning(
+                chat_id,
+                warning_id
+            )
         )
 
 
@@ -783,37 +955,56 @@ async def reserve_update(update_id):
     async with update_lock:
 
         if update_id in processed_update_ids:
+
             return "processed"
 
         if update_id in pending_update_ids:
+
             return "pending"
 
-        pending_update_ids.add(update_id)
+        pending_update_ids.add(
+            update_id
+        )
 
         return "reserved"
 
 
-async def finish_update(update_id, success):
+async def finish_update(
+    update_id,
+    success
+):
 
     async with update_lock:
 
-        pending_update_ids.discard(update_id)
+        pending_update_ids.discard(
+            update_id
+        )
 
         if (
             not success
             or update_id in processed_update_ids
         ):
+
             return
 
-        if len(processed_update_order) >= MAX_PROCESSED_UPDATES:
+        if (
+            len(processed_update_order)
+            >= MAX_PROCESSED_UPDATES
+        ):
 
             oldest = processed_update_order.popleft()
 
-            processed_update_ids.discard(oldest)
+            processed_update_ids.discard(
+                oldest
+            )
 
-        processed_update_order.append(update_id)
+        processed_update_order.append(
+            update_id
+        )
 
-        processed_update_ids.add(update_id)
+        processed_update_ids.add(
+            update_id
+        )
 
 
 # ==================================================
@@ -863,7 +1054,9 @@ async def handle_webhook(request):
 
     update_id = telegram_update.update_id
 
-    reservation = await reserve_update(update_id)
+    reservation = await reserve_update(
+        update_id
+    )
 
     if reservation == "processed":
 
@@ -960,6 +1153,16 @@ async def main_async():
             BOT_ID
         )
 
+        logger.info(
+            "Целевая группа ID: %s",
+            TARGET_GROUP_ID
+        )
+
+        logger.info(
+            "Разрешённая тема ID: %s",
+            ALLOWED_TOPIC_ID
+        )
+
         await runner.setup()
 
         site = web.TCPSite(
@@ -998,11 +1201,13 @@ async def main_async():
         )
 
         for task in list(background_tasks):
+
             task.cancel()
 
         for task in list(background_tasks):
 
             with suppress(asyncio.CancelledError):
+
                 await task
 
         await runner.cleanup()
@@ -1022,7 +1227,9 @@ if __name__ == "__main__":
 
     try:
 
-        asyncio.run(main_async())
+        asyncio.run(
+            main_async()
+        )
 
     except (KeyboardInterrupt, SystemExit):
 
