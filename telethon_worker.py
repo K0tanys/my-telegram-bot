@@ -4,7 +4,7 @@ import logging
 import asyncio
 
 from telethon import TelegramClient, events, utils
-from telethon.session import StringSession
+from telethon.sessions import StringSession
 from telethon.tl.types import (
     PeerChannel,
     DocumentAttributeVideo,
@@ -318,9 +318,6 @@ async def send_media_via_telethon(
     """
     Используется, если Bot API не принимает файл
     из-за превышения допустимого размера.
-
-    Медиа отправляется непосредственно из Telegram
-    в целевую тему через Telethon.
     """
 
     await client.send_file(
@@ -837,15 +834,26 @@ async def check_command_handler(event):
 
     topic_id = get_topic_id(event)
 
+    logger.info(
+        "Получена команда /check. Message ID: %s, "
+        "Sender ID: %s, Topic ID: %s",
+        event.id,
+        event.sender_id,
+        topic_id
+    )
+
     if topic_id != NEWS_TOPIC_ID:
+
+        logger.warning(
+            "/check получена не в теме новостей. "
+            "Message ID: %s, Topic ID: %s",
+            event.id,
+            topic_id
+        )
         return
 
-    # Проверяем, отправлена ли команда анонимно
-    # от имени целевой группы.
     anonymous_admin = is_anonymous_group_admin(event)
 
-    # Если команда не анонимная, проверяем
-    # личные права отправителя.
     if not anonymous_admin:
 
         if not await is_group_admin(event.sender_id):
@@ -896,6 +904,11 @@ async def check_command_handler(event):
                 return
 
             last_message = latest[0]
+
+            logger.info(
+                "Последняя публикация источника: %s",
+                last_message.id
+            )
 
             if last_message.grouped_id:
 
@@ -987,6 +1000,7 @@ async def main():
     finally:
 
         await bot.session.close()
+        await client.disconnect()
 
 
 # ==================================================
