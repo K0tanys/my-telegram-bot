@@ -50,9 +50,11 @@ PORT = int(os.getenv("PORT", "10000"))
 ALLOWED_TOPIC_ID = 18600
 
 # Целевая группа GameFloid.
-# ID задан непосредственно в коде.
-# Дополнительная переменная Render не требуется.
 TARGET_GROUP_ID = -1002165454770
+
+# Тема новостей.
+# Команду /check в этой теме обрабатывает Telethon Worker.
+NEWS_TOPIC_ID = 25114
 
 # Через сколько секунд удалять предупреждение.
 WARNING_DELETE_DELAY = 12
@@ -119,12 +121,14 @@ def escape(value):
 
 
 def normalize_commands(commands):
+
     if isinstance(commands, str):
         commands = (commands,)
 
     result = set()
 
     for item in commands:
+
         command = str(item).strip().lower()
 
         if not command:
@@ -144,6 +148,7 @@ TARGET_COMMAND_SET = normalize_commands(
 
 
 def is_target_command(text):
+
     if not text or not text.strip():
         return False
 
@@ -386,7 +391,35 @@ async def moderate_chat(message: Message):
     )
 
     # ------------------------------------------------
-    # ШАГ 4. ПОЛНОСТЬЮ ИСКЛЮЧАЕМ ТЕМУ 18600
+    # ШАГ 4. ПЕРЕДАЁМ /check TELETHON WORKER
+    # ------------------------------------------------
+
+    if (
+        current_topic == NEWS_TOPIC_ID
+        and message.text
+    ):
+
+        first_part = message.text.strip().split(
+            maxsplit=1
+        )[0]
+
+        command = first_part.split(
+            "@",
+            1
+        )[0].lower()
+
+        if command == "/check":
+
+            logger.info(
+                "Команда /check передана Telethon Worker. "
+                "Message ID: %s",
+                message.message_id
+            )
+
+            return
+
+    # ------------------------------------------------
+    # ШАГ 5. ПОЛНОСТЬЮ ИСКЛЮЧАЕМ ТЕМУ 18600
     # ------------------------------------------------
 
     if is_ignored_topic(message):
@@ -401,7 +434,7 @@ async def moderate_chat(message: Message):
         return
 
     # ------------------------------------------------
-    # ШАГ 5. НЕ ТРОГАЕМ САМОГО СЕБЯ
+    # ШАГ 6. НЕ ТРОГАЕМ САМОГО СЕБЯ
     # ------------------------------------------------
 
     if (
@@ -411,7 +444,7 @@ async def moderate_chat(message: Message):
         return
 
     # ------------------------------------------------
-    # ШАГ 6. НЕ МОДЕРИРУЕМ ДРУГИХ БОТОВ
+    # ШАГ 7. НЕ МОДЕРИРУЕМ ДРУГИХ БОТОВ
     #
     # В том числе @BrAssGay.
     # Его сообщения удаляет исключительно Telethon.
@@ -424,14 +457,14 @@ async def moderate_chat(message: Message):
         return
 
     # ------------------------------------------------
-    # ШАГ 7. ПРОВЕРЯЕМ ТЕКСТ
+    # ШАГ 8. ПРОВЕРЯЕМ ТЕКСТ
     # ------------------------------------------------
 
     if not message.text:
         return
 
     # ------------------------------------------------
-    # ШАГ 8. ПРОВЕРЯЕМ ЗАПРЕЩЁННЫЕ КОМАНДЫ
+    # ШАГ 9. ПРОВЕРЯЕМ ЗАПРЕЩЁННЫЕ КОМАНДЫ
     # ------------------------------------------------
 
     if not is_target_command(message.text):
@@ -441,7 +474,7 @@ async def moderate_chat(message: Message):
         return
 
     # ------------------------------------------------
-    # ШАГ 9. СОБИРАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ
+    # ШАГ 10. СОБИРАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ
     # ------------------------------------------------
 
     user_id = message.from_user.id
@@ -466,7 +499,7 @@ async def moderate_chat(message: Message):
     )
 
     # ------------------------------------------------
-    # ШАГ 10. ТЕКСТ ПРЕДУПРЕЖДЕНИЯ
+    # ШАГ 11. ТЕКСТ ПРЕДУПРЕЖДЕНИЯ
     # ------------------------------------------------
 
     warning_text = (
@@ -482,7 +515,7 @@ async def moderate_chat(message: Message):
     warning_id = None
 
     # ------------------------------------------------
-    # ШАГ 11. ОТПРАВЛЯЕМ ПРЕДУПРЕЖДЕНИЕ
+    # ШАГ 12. ОТПРАВЛЯЕМ ПРЕДУПРЕЖДЕНИЕ
     # ------------------------------------------------
 
     try:
@@ -503,7 +536,7 @@ async def moderate_chat(message: Message):
         )
 
     # ------------------------------------------------
-    # ШАГ 12. УДАЛЯЕМ КОМАНДУ
+    # ШАГ 13. УДАЛЯЕМ КОМАНДУ
     # ------------------------------------------------
 
     command_deleted = False
@@ -526,7 +559,7 @@ async def moderate_chat(message: Message):
         )
 
     # ------------------------------------------------
-    # ШАГ 13. ОТПРАВЛЯЕМ ОТЧЁТ АДМИНИСТРАЦИИ
+    # ШАГ 14. ОТПРАВЛЯЕМ ОТЧЁТ АДМИНИСТРАЦИИ
     # ------------------------------------------------
 
     await send_admin_report(
@@ -539,7 +572,7 @@ async def moderate_chat(message: Message):
     )
 
     # ------------------------------------------------
-    # ШАГ 14. УДАЛЯЕМ ПРЕДУПРЕЖДЕНИЕ ЧЕРЕЗ 12 СЕКУНД
+    # ШАГ 15. УДАЛЯЕМ ПРЕДУПРЕЖДЕНИЕ ЧЕРЕЗ 12 СЕКУНД
     # ------------------------------------------------
 
     if warning_id is not None:
@@ -779,6 +812,11 @@ async def main_async():
         )
 
         logger.info(
+            "Тема новостей ID: %s",
+            NEWS_TOPIC_ID
+        )
+
+        logger.info(
             "Команды под модерацией: %s",
             sorted(TARGET_COMMAND_SET)
         )
@@ -789,6 +827,10 @@ async def main_async():
 
         logger.info(
             "Модерация @BrAssGay передана Telethon"
+        )
+
+        logger.info(
+            "Команда /check в теме новостей передаётся Telethon"
         )
 
         logger.info(
