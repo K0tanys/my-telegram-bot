@@ -3,9 +3,10 @@ import os
 import logging
 import asyncio
 
-from telethon import TelegramClient, events
-from telethon.sessions import StringSession
+from telethon import TelegramClient, events, utils
+from telethon.session import StringSession
 from telethon.tl.types import (
+    PeerChannel,
     DocumentAttributeVideo,
     DocumentAttributeFilename,
     DocumentAttributeAnimated,
@@ -14,6 +15,7 @@ from telethon.tl.types import (
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramEntityTooLarge
 from aiogram.types import (
     BufferedInputFile,
     MessageEntity,
@@ -121,7 +123,31 @@ def get_topic_id(event):
 
 
 # ==================================================
-# 7. ПРЕОБРАЗОВАНИЕ ФОРМАТИРОВАНИЯ
+# 7. ПРОВЕРКА АНОНИМНОГО АДМИНИСТРАТОРА
+# ==================================================
+
+def is_anonymous_group_admin(event):
+
+    """
+    Анонимный администратор отправляет сообщение
+    от имени самой супергруппы.
+
+    Проверяем, что отправитель сообщения —
+    именно целевая группа GameFloid.
+    """
+
+    sender_peer = event.message.from_id
+
+    if not isinstance(sender_peer, PeerChannel):
+        return False
+
+    sender_chat_id = utils.get_peer_id(sender_peer)
+
+    return sender_chat_id == NEWS_TARGET_CHAT_ID
+
+
+# ==================================================
+# 8. ПРЕОБРАЗОВАНИЕ ФОРМАТИРОВАНИЯ
 # ==================================================
 
 def convert_entities(entities):
@@ -157,9 +183,7 @@ def convert_entities(entities):
         class_name = entity.__class__.__name__
         entity_type = entity_mapping.get(class_name)
 
-        # Упоминание пользователя с ID.
         if class_name == "MessageEntityMentionName":
-
             entity_type = "text_link"
 
         if not entity_type:
@@ -189,7 +213,7 @@ def convert_entities(entities):
 
 
 # ==================================================
-# 8. ПОЛУЧЕНИЕ ИНФОРМАЦИИ О ФАЙЛЕ
+# 9. ПОЛУЧЕНИЕ ИНФОРМАЦИИ О ФАЙЛЕ
 # ==================================================
 
 def get_document_info(message):
@@ -224,7 +248,7 @@ def get_document_info(message):
 
 
 # ==================================================
-# 9. ПОДГОТОВКА МЕДИА ДЛЯ BOT API
+# 10. ПОДГОТОВКА МЕДИА ДЛЯ BOT API
 # ==================================================
 
 async def prepare_media(message):
@@ -282,7 +306,39 @@ async def prepare_media(message):
 
 
 # ==================================================
-# 10. ОТПРАВКА ТЕКСТА
+# 11. РЕЗЕРВНАЯ ОТПРАВКА ЧЕРЕЗ TELETHON
+# ==================================================
+
+async def send_media_via_telethon(
+    message,
+    caption=None,
+    entities=None
+):
+
+    """
+    Используется, если Bot API не принимает файл
+    из-за превышения допустимого размера.
+
+    Медиа отправляется непосредственно из Telegram
+    в целевую тему через Telethon.
+    """
+
+    await client.send_file(
+        entity=NEWS_TARGET_CHAT_ID,
+        file=message.media,
+        caption=caption or "",
+        formatting_entities=entities if caption else None,
+        reply_to=NEWS_TOPIC_ID
+    )
+
+    logger.info(
+        "Медиа %s отправлено резервным способом через Telethon.",
+        message.id
+    )
+
+
+# ==================================================
+# 12. ОТПРАВКА ТЕКСТА
 # ==================================================
 
 async def send_news_text(text, entities=None):
@@ -302,7 +358,7 @@ async def send_news_text(text, entities=None):
 
 
 # ==================================================
-# 11. ОТПРАВКА ОДНОЙ НОВОСТИ
+# 13. ОТПРАВКА ОДНОЙ НОВОСТИ
 # ==================================================
 
 async def copy_single_news(message):
@@ -324,44 +380,59 @@ async def copy_single_news(message):
                 return False
 
             caption = text if len(text) <= 1024 else None
+
             caption_entities = (
                 convert_entities(entities)
                 if caption
                 else None
             )
 
-            if media["type"] == "photo":
+            try:
 
-                await bot.send_photo(
-                    chat_id=NEWS_TARGET_CHAT_ID,
-                    message_thread_id=NEWS_TOPIC_ID,
-                    photo=media["file"],
-                    caption=caption,
-                    caption_entities=caption_entities
+                if media["type"] == "photo":
+
+                    await bot.send_photo(
+                        chat_id=NEWS_TARGET_CHAT_ID,
+                        message_thread_id=NEWS_TOPIC_ID,
+                        photo=media["file"],
+                        caption=caption,
+                        caption_entities=caption_entities
+                    )
+
+                elif media["type"] == "video":
+
+                    await bot.send_video(
+                        chat_id=NEWS_TARGET_CHAT_ID,
+                        message_thread_id=NEWS_TOPIC_ID,
+                        video=media["file"],
+                        caption=caption,
+                        caption_entities=caption_entities
+                    )
+
+                else:
+
+                    await bot.send_document(
+                        chat_id=NEWS_TARGET_CHAT_ID,
+                        message_thread_id=NEWS_TOPIC_ID,
+                        document=media["file"],
+                        caption=caption,
+                        caption_entities=caption_entities
+                    )
+
+            except TelegramEntityTooLarge:
+
+                logger.warning(
+                    "Файл публикации %s превышает лимит Bot API. "
+                    "Переключаемся на Telethon.",
+                    message.id
                 )
 
-            elif media["type"] == "video":
-
-                await bot.send_video(
-                    chat_id=NEWS_TARGET_CHAT_ID,
-                    message_thread_id=NEWS_TOPIC_ID,
-                    video=media["file"],
+                await send_media_via_telethon(
+                    message,
                     caption=caption,
-                    caption_entities=caption_entities
+                    entities=entities
                 )
 
-            else:
-
-                await bot.send_document(
-                    chat_id=NEWS_TARGET_CHAT_ID,
-                    message_thread_id=NEWS_TOPIC_ID,
-                    document=media["file"],
-                    caption=caption,
-                    caption_entities=caption_entities
-                )
-
-            # Если подпись длиннее лимита Bot API,
-            # отправляем полный текст отдельным сообщением.
             if text and len(text) > 1024:
                 await send_news_text(text, entities)
 
@@ -378,8 +449,7 @@ async def copy_single_news(message):
             return False
 
         logger.info(
-            "Новость опубликована от имени GameFloid. "
-            "Источник: %s",
+            "Новость опубликована. Источник: %s",
             message.id
         )
 
@@ -395,7 +465,62 @@ async def copy_single_news(message):
 
 
 # ==================================================
-# 12. ОТПРАВКА АЛЬБОМА
+# 14. РЕЗЕРВНАЯ ОТПРАВКА АЛЬБОМА ЧЕРЕЗ TELETHON
+# ==================================================
+
+async def send_album_via_telethon(
+    messages,
+    caption=None,
+    entities=None
+):
+
+    """
+    При превышении лимита Bot API отправляет
+    элементы альбома через Telethon.
+
+    Каждый элемент остаётся в нужной теме.
+    """
+
+    messages = sorted(
+        messages,
+        key=lambda item: item.id
+    )
+
+    media_messages = [
+        message
+        for message in messages
+        if message.photo or message.document
+    ]
+
+    for index, message in enumerate(media_messages):
+
+        item_caption = (
+            caption
+            if index == 0 and caption
+            else None
+        )
+
+        await client.send_file(
+            entity=NEWS_TARGET_CHAT_ID,
+            file=message.media,
+            caption=item_caption or "",
+            formatting_entities=(
+                entities
+                if item_caption
+                else None
+            ),
+            reply_to=NEWS_TOPIC_ID
+        )
+
+    logger.info(
+        "Альбом отправлен резервным способом через Telethon. "
+        "Элементов: %s",
+        len(media_messages)
+    )
+
+
+# ==================================================
+# 15. ОТПРАВКА АЛЬБОМА
 # ==================================================
 
 async def copy_album_news(messages):
@@ -420,7 +545,6 @@ async def copy_album_news(messages):
             logger.warning("В альбоме нет доступных медиа.")
             return False
 
-        # Подпись ищем среди всех элементов альбома.
         caption_message = next(
             (
                 message
@@ -442,7 +566,6 @@ async def copy_album_news(messages):
             else []
         )
 
-        # Подпись Bot API ограничена 1024 символами.
         use_caption = bool(caption) and len(caption) <= 1024
 
         media_group = []
@@ -487,68 +610,80 @@ async def copy_album_news(messages):
 
             media_group.append(item)
 
-        if len(media_group) == 1:
+        try:
 
-            # Telegram не принимает альбом из одного элемента.
-            # Отправляем единственный файл отдельно.
-            message, media = prepared[0]
+            if len(media_group) == 1:
 
-            if media["type"] == "photo":
+                message, media = prepared[0]
 
-                await bot.send_photo(
-                    chat_id=NEWS_TARGET_CHAT_ID,
-                    message_thread_id=NEWS_TOPIC_ID,
-                    photo=media["file"],
-                    caption=caption if use_caption else None,
-                    caption_entities=(
-                        convert_entities(caption_entities)
-                        if use_caption
-                        else None
+                if media["type"] == "photo":
+
+                    await bot.send_photo(
+                        chat_id=NEWS_TARGET_CHAT_ID,
+                        message_thread_id=NEWS_TOPIC_ID,
+                        photo=media["file"],
+                        caption=caption if use_caption else None,
+                        caption_entities=(
+                            convert_entities(caption_entities)
+                            if use_caption
+                            else None
+                        )
                     )
-                )
 
-            elif media["type"] == "video":
+                elif media["type"] == "video":
 
-                await bot.send_video(
-                    chat_id=NEWS_TARGET_CHAT_ID,
-                    message_thread_id=NEWS_TOPIC_ID,
-                    video=media["file"],
-                    caption=caption if use_caption else None,
-                    caption_entities=(
-                        convert_entities(caption_entities)
-                        if use_caption
-                        else None
+                    await bot.send_video(
+                        chat_id=NEWS_TARGET_CHAT_ID,
+                        message_thread_id=NEWS_TOPIC_ID,
+                        video=media["file"],
+                        caption=caption if use_caption else None,
+                        caption_entities=(
+                            convert_entities(caption_entities)
+                            if use_caption
+                            else None
+                        )
                     )
-                )
+
+                else:
+
+                    await bot.send_document(
+                        chat_id=NEWS_TARGET_CHAT_ID,
+                        message_thread_id=NEWS_TOPIC_ID,
+                        document=media["file"],
+                        caption=caption if use_caption else None,
+                        caption_entities=(
+                            convert_entities(caption_entities)
+                            if use_caption
+                            else None
+                        )
+                    )
 
             else:
 
-                await bot.send_document(
+                await bot.send_media_group(
                     chat_id=NEWS_TARGET_CHAT_ID,
                     message_thread_id=NEWS_TOPIC_ID,
-                    document=media["file"],
-                    caption=caption if use_caption else None,
-                    caption_entities=(
-                        convert_entities(caption_entities)
-                        if use_caption
-                        else None
-                    )
+                    media=media_group
                 )
 
-        else:
+        except TelegramEntityTooLarge:
 
-            await bot.send_media_group(
-                chat_id=NEWS_TARGET_CHAT_ID,
-                message_thread_id=NEWS_TOPIC_ID,
-                media=media_group
+            logger.warning(
+                "Альбом превышает лимит Bot API. "
+                "Переключаемся на Telethon."
+            )
+
+            await send_album_via_telethon(
+                messages,
+                caption=caption if use_caption else None,
+                entities=caption_entities
             )
 
         if caption and not use_caption:
             await send_news_text(caption, caption_entities)
 
         logger.info(
-            "Альбом опубликован от имени GameFloid. "
-            "Элементов: %s",
+            "Альбом опубликован. Элементов: %s",
             len(media_group)
         )
 
@@ -561,7 +696,7 @@ async def copy_album_news(messages):
 
 
 # ==================================================
-# 13. УДАЛЕНИЕ СООБЩЕНИЙ @BrAssGay
+# 16. УДАЛЕНИЕ СООБЩЕНИЙ @BrAssGay
 # ==================================================
 
 @client.on(events.NewMessage)
@@ -610,7 +745,7 @@ async def my_event_handler(event):
 
 
 # ==================================================
-# 14. АВТОМАТИЧЕСКОЕ КОПИРОВАНИЕ НОВОСТЕЙ
+# 17. АВТОМАТИЧЕСКОЕ КОПИРОВАНИЕ НОВОСТЕЙ
 # ==================================================
 
 @client.on(events.NewMessage(chats=SOURCE_CHANNEL))
@@ -632,7 +767,7 @@ async def news_handler(event):
 
 
 # ==================================================
-# 15. АВТОМАТИЧЕСКОЕ КОПИРОВАНИЕ АЛЬБОМОВ
+# 18. АВТОМАТИЧЕСКОЕ КОПИРОВАНИЕ АЛЬБОМОВ
 # ==================================================
 
 @client.on(events.Album(chats=SOURCE_CHANNEL))
@@ -652,7 +787,7 @@ async def news_album_handler(event):
 
 
 # ==================================================
-# 16. ПРОВЕРКА ПРАВ АДМИНИСТРАТОРА
+# 19. ПРОВЕРКА ПРАВ АДМИНИСТРАТОРА
 # ==================================================
 
 async def is_group_admin(user_id):
@@ -683,7 +818,7 @@ async def is_group_admin(user_id):
 
 
 # ==================================================
-# 17. РУЧНАЯ ПРОВЕРКА /check
+# 20. РУЧНАЯ ПРОВЕРКА /check
 # ==================================================
 
 @client.on(events.NewMessage)
@@ -700,34 +835,48 @@ async def check_command_handler(event):
     if command[0].split("@")[0].lower() != "/check":
         return
 
-    # Команда должна быть отправлена именно в теме новостей.
     topic_id = get_topic_id(event)
 
     if topic_id != NEWS_TOPIC_ID:
         return
 
-    # Проверяем права отправителя через Bot API.
-    if not await is_group_admin(event.sender_id):
+    # Проверяем, отправлена ли команда анонимно
+    # от имени целевой группы.
+    anonymous_admin = is_anonymous_group_admin(event)
 
-        logger.warning(
-            "Пользователь %s попытался выполнить /check "
-            "без прав администратора.",
+    # Если команда не анонимная, проверяем
+    # личные права отправителя.
+    if not anonymous_admin:
+
+        if not await is_group_admin(event.sender_id):
+
+            logger.warning(
+                "Пользователь %s попытался выполнить /check "
+                "без прав администратора.",
+                event.sender_id
+            )
+
+            try:
+                await event.delete()
+
+            except Exception:
+                logger.exception(
+                    "Не удалось удалить неавторизованную команду /check"
+                )
+
+            return
+
+        logger.info(
+            "Администратор %s запустил /check.",
             event.sender_id
         )
 
-        try:
-            await event.delete()
-        except Exception:
-            logger.exception(
-                "Не удалось удалить неавторизованную команду /check"
-            )
+    else:
 
-        return
-
-    logger.info(
-        "Администратор %s запустил /check.",
-        event.sender_id
-    )
+        logger.info(
+            "Анонимный администратор группы GameFloid "
+            "запустил /check."
+        )
 
     async with news_lock:
 
@@ -796,7 +945,7 @@ async def check_command_handler(event):
 
 
 # ==================================================
-# 18. ЗАПУСК
+# 21. ЗАПУСК
 # ==================================================
 
 async def main():
@@ -827,9 +976,12 @@ async def main():
     logger.info("Модерация @BrAssGay активна")
     logger.info("Автоматическое копирование новостей активно")
     logger.info("Публикация выполняется от имени GameFloid")
+    logger.info("Резервная отправка больших файлов через Telethon активна")
+    logger.info("Анонимные администраторы могут запускать /check")
     logger.info("Команда /check доступна администраторам")
 
     try:
+
         await client.run_until_disconnected()
 
     finally:
@@ -838,13 +990,15 @@ async def main():
 
 
 # ==================================================
-# 19. ТОЧКА ВХОДА
+# 22. ТОЧКА ВХОДА
 # ==================================================
 
 if __name__ == "__main__":
 
     try:
+
         asyncio.run(main())
 
     except (KeyboardInterrupt, SystemExit):
+
         logger.info("Работа Telethon завершена")
