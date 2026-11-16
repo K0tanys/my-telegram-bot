@@ -45,7 +45,7 @@ PORT = int(os.getenv("PORT", "10000"))
 # 2. НАСТРОЙКИ МОДЕРАЦИИ
 # ==================================================
 
-# ID темы «Чат для общения».
+# Тема «Чат для общения».
 # Основной бот ничего не делает в этой теме.
 ALLOWED_TOPIC_ID = 18600
 
@@ -53,7 +53,7 @@ ALLOWED_TOPIC_ID = 18600
 TARGET_GROUP_ID = -1002165454770
 
 # Тема новостей.
-# Команду /check в этой теме обрабатывает Telethon Worker.
+# Команду /check обрабатывает Telethon Worker.
 NEWS_TOPIC_ID = 25114
 
 # Через сколько секунд удалять предупреждение.
@@ -170,14 +170,12 @@ def is_target_command(text):
 
 def is_target_group(message: Message):
 
-    # Личные сообщения и каналы не модерируются.
     if message.chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
     ):
         return False
 
-    # Работаем исключительно в GameFloid.
     return message.chat.id == TARGET_GROUP_ID
 
 
@@ -254,10 +252,22 @@ async def send_admin_report(
 
     try:
 
-        mention = (
-            f'<a href="tg://user?id={user_id}">'
-            f'{escape(first_name)}</a>'
-        )
+        if user_id:
+
+            mention = (
+                f'<a href="tg://user?id={user_id}">'
+                f'{escape(first_name)}</a>'
+            )
+
+            user_id_text = f"<code>{user_id}</code>"
+
+        else:
+
+            mention = escape(first_name)
+
+            user_id_text = (
+                "Анонимно, от имени группы"
+            )
 
         username_text = (
             f" | @{escape(username)}"
@@ -292,7 +302,7 @@ async def send_admin_report(
             f"👤 <b>Нарушитель:</b> "
             f"{mention}{username_text}\n"
             f"🆔 <b>ID пользователя:</b> "
-            f"<code>{user_id}</code>\n"
+            f"{user_id_text}\n"
             f"🏷 <b>Тема нарушения:</b> "
             f"{topic_display}\n"
             f"⌨️ <b>Запрещённая команда:</b> "
@@ -309,7 +319,7 @@ async def send_admin_report(
 
         logger.info(
             "Отчёт отправлен администрации. User ID: %s",
-            user_id
+            user_id if user_id else "анонимно"
         )
 
     except TelegramAPIError:
@@ -434,7 +444,16 @@ async def moderate_chat(message: Message):
         return
 
     # ------------------------------------------------
-    # ШАГ 6. НЕ ТРОГАЕМ САМОГО СЕБЯ
+    # ШАГ 6. ОПРЕДЕЛЯЕМ АНОНИМНОГО ОТПРАВИТЕЛЯ
+    # ------------------------------------------------
+
+    is_anonymous_group_sender = (
+        message.sender_chat is not None
+        and message.sender_chat.id == message.chat.id
+    )
+
+    # ------------------------------------------------
+    # ШАГ 7. НЕ ТРОГАЕМ САМОГО СЕБЯ И ДРУГИХ БОТОВ
     # ------------------------------------------------
 
     if (
@@ -443,16 +462,15 @@ async def moderate_chat(message: Message):
     ):
         return
 
-    # ------------------------------------------------
-    # ШАГ 7. НЕ МОДЕРИРУЕМ ДРУГИХ БОТОВ
-    #
-    # В том числе @BrAssGay.
-    # Его сообщения удаляет исключительно Telethon.
-    # ------------------------------------------------
+    # GroupAnonymousBot может представлять
+    # анонимного администратора группы.
+    # Его сообщение не пропускаем, если sender_chat
+    # совпадает с целевой группой.
 
     if (
         message.from_user
         and message.from_user.is_bot
+        and not is_anonymous_group_sender
     ):
         return
 
@@ -470,21 +488,40 @@ async def moderate_chat(message: Message):
     if not is_target_command(message.text):
         return
 
-    if not message.from_user:
-        return
-
     # ------------------------------------------------
-    # ШАГ 10. СОБИРАЕМ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ
+    # ШАГ 10. СОБИРАЕМ ДАННЫЕ ОТПРАВИТЕЛЯ
     # ------------------------------------------------
 
-    user_id = message.from_user.id
+    if is_anonymous_group_sender:
 
-    first_name = (
-        message.from_user.first_name
-        or "Пользователь"
-    )
+        user_id = None
 
-    username = message.from_user.username
+        first_name = (
+            message.sender_chat.title
+            or "Администратор группы"
+        )
+
+        username = None
+
+        logger.info(
+            "Обнаружено анонимное сообщение "
+            "от имени группы: %s",
+            first_name
+        )
+
+    else:
+
+        if not message.from_user:
+            return
+
+        user_id = message.from_user.id
+
+        first_name = (
+            message.from_user.first_name
+            or "Пользователь"
+        )
+
+        username = message.from_user.username
 
     chat_id = message.chat.id
 
@@ -494,7 +531,7 @@ async def moderate_chat(message: Message):
         "Запрещённая команда: %s, пользователь: %s, "
         "тема: %s",
         command_text,
-        user_id,
+        user_id if user_id else "анонимно",
         current_topic
     )
 
@@ -502,9 +539,19 @@ async def moderate_chat(message: Message):
     # ШАГ 11. ТЕКСТ ПРЕДУПРЕЖДЕНИЯ
     # ------------------------------------------------
 
+    if user_id:
+
+        warning_mention = (
+            f'<a href="tg://user?id={user_id}">'
+            f'{escape(first_name)}</a>'
+        )
+
+    else:
+
+        warning_mention = escape(first_name)
+
     warning_text = (
-        f'⚠️ <a href="tg://user?id={user_id}">'
-        f'{escape(first_name)}</a>, '
+        f'⚠️ {warning_mention}, '
         f'использовать команды бота '
         f'<b>BR Assistant</b>\n'
         f'можно строго в теме '
@@ -827,6 +874,10 @@ async def main_async():
 
         logger.info(
             "Модерация @BrAssGay передана Telethon"
+        )
+
+        logger.info(
+            "Анонимные сообщения от имени группы проверяются"
         )
 
         logger.info(
