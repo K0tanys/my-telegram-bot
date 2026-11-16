@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import os
@@ -6,7 +7,7 @@ import tempfile
 from pathlib import Path
 from contextlib import suppress
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions, helpers
 from telethon.sessions import StringSession
 from telethon.tl.types import (
     DocumentAttributeAnimated,
@@ -66,8 +67,7 @@ IGNORE_TOPIC_ID = 18600
 
 DATABASE_PATH = os.getenv("NEWS_DATABASE", "news_state.sqlite3")
 
-# Conservative Bot API upload thresholds. The actual API response is
-# authoritative; a size error at upload time triggers the fallback.
+# Conservative Bot API upload thresholds.
 PHOTO_LIMIT = 10 * 1024 * 1024
 GENERAL_FILE_LIMIT = 50 * 1024 * 1024
 
@@ -176,6 +176,7 @@ def convert_entities(entities):
             "offset": entity.offset,
             "length": entity.length,
         }
+
         if isinstance(entity, MessageEntityTextUrl):
             kwargs["url"] = entity.url
         elif isinstance(entity, MessageEntityPre) and entity.language:
@@ -204,6 +205,7 @@ def get_topic_id(event):
     """Return the forum topic root ID, or None if it cannot be determined."""
     message = event.message
     reply = getattr(message, "reply_to", None)
+
     if not reply:
         return None
 
@@ -223,10 +225,12 @@ async def moderate_brassgay(event):
     # Keep the original moderation scope unchanged.
     if event.chat_id != TARGET_CHAT_ID:
         return
+
     if event.sender_id != TARGET_BOT_ID:
         return
 
     topic_id = get_topic_id(event)
+
     if topic_id is None:
         logger.warning(
             "Не удалось определить тему сообщения %s. Удаление отменено.",
@@ -262,12 +266,16 @@ def get_media_kind(message):
         return "photo"
 
     document = getattr(message, "document", None)
+
     if document:
         attrs = document.attributes or []
+
         if any(isinstance(a, DocumentAttributeAnimated) for a in attrs):
             return "animation"
+
         if any(isinstance(a, DocumentAttributeVideo) for a in attrs):
             return "video"
+
         return "document"
 
     return None
@@ -283,10 +291,13 @@ def get_media_size(message) -> int:
 def exceeds_known_upload_limit(message) -> bool:
     kind = get_media_kind(message)
     size = get_media_size(message)
+
     if not kind or not size:
         return False
+
     if kind == "photo":
         return size > PHOTO_LIMIT
+
     return size > GENERAL_FILE_LIMIT
 
 
@@ -295,17 +306,20 @@ def is_size_error(error: Exception) -> bool:
         return True
 
     message = str(error).lower()
+
     phrases = (
         "file is too big",
         "file too large",
         "request entity too large",
         "entity too large",
     )
+
     return any(phrase in message for phrase in phrases)
 
 
 async def download_media_to_path(message, directory: str) -> str:
     extension = ".bin"
+
     try:
         if message.file and message.file.ext:
             extension = message.file.ext
@@ -313,9 +327,14 @@ async def download_media_to_path(message, directory: str) -> str:
         pass
 
     path = str(Path(directory) / f"{message.id}{extension}")
+
     downloaded = await client.download_media(message, file=path)
+
     if not downloaded:
-        raise RuntimeError(f"Не удалось скачать медиа исходного сообщения {message.id}")
+        raise RuntimeError(
+            f"Не удалось скачать медиа исходного сообщения {message.id}"
+        )
+
     return path
 
 
@@ -324,25 +343,47 @@ async def download_media_to_path(message, directory: str) -> str:
 # ============================================================
 
 async def publish_via_telethon(messages):
-    """Server-side forward of the original source message(s)."""
+    """
+    Forward original source messages directly into the news forum topic.
+
+    Telethon 1.45.0 high-level forward_messages() has no reply_to argument.
+    Raw MTProto ForwardMessagesRequest supports top_msg_id.
+    """
+
     if not source_entity:
         raise RuntimeError("Источник новостей ещё не инициализирован")
 
     ordered = sorted(messages, key=lambda item: item.id)
+
+    if not ordered:
+        return
+
     logger.warning(
-        "Bot API не может принять файл/альбом. Переключаюсь на Telethon; IDs=%s",
+        "Bot API не может принять файл/альбом. "
+        "Переключаюсь на Telethon; IDs=%s",
         [m.id for m in ordered],
     )
 
-    await client.forward_messages(
-        entity=TARGET_CHAT_ID,
-        messages=ordered,
-        from_peer=source_entity,
-        reply_to=NEWS_TOPIC_ID,
+    source_peer = await client.get_input_entity(source_entity)
+    target_peer = await client.get_input_entity(TARGET_CHAT_ID)
+
+    request = functions.messages.ForwardMessagesRequest(
+        from_peer=source_peer,
+        id=[message.id for message in ordered],
+        random_id=[
+            helpers.generate_random_long()
+            for _ in ordered
+        ],
+        to_peer=target_peer,
+        top_msg_id=NEWS_TOPIC_ID,
     )
 
+    await client(request)
+
     logger.info(
-        "Резервная публикация через Telethon завершена; IDs=%s",
+        "Резервная публикация через Telethon завершена "
+        "в теме %s; IDs=%s",
+        NEWS_TOPIC_ID,
         [m.id for m in ordered],
     )
 
@@ -353,8 +394,8 @@ async def publish_via_telethon(messages):
 
 async def send_text_via_bot(message):
     text = message.message or ""
+
     if not text:
-        # A media-only post is handled by the media sender.
         return
 
     await bot.send_message(
@@ -367,24 +408,31 @@ async def send_text_via_bot(message):
 
 async def send_single_media(message):
     kind = get_media_kind(message)
+
     if not kind:
-        # Unknown media (poll, webpage, etc.) is safer to forward as-is.
+        # Unknown media is safer to forward as-is.
         if message.media:
             await publish_via_telethon([message])
         else:
             await send_text_via_bot(message)
+
         return
 
-    # GIF/animation upload handling differs from ordinary document upload;
-    # preserve the original Telegram object using the Telethon fallback.
+    # GIF/animation uses Telethon fallback.
     if kind == "animation" or exceeds_known_upload_limit(message):
         await publish_via_telethon([message])
         return
 
     original_caption = message.message or ""
     caption_too_long = is_caption_too_long(original_caption)
+
     caption = "" if caption_too_long else original_caption
-    caption_entities = None if caption_too_long else convert_entities(message.entities)
+
+    caption_entities = (
+        None
+        if caption_too_long
+        else convert_entities(message.entities)
+    )
 
     with tempfile.TemporaryDirectory(prefix="news_") as directory:
         path = await download_media_to_path(message, directory)
@@ -399,29 +447,40 @@ async def send_single_media(message):
             }
 
             if kind == "photo":
-                await bot.send_photo(photo=upload, **common)
+                await bot.send_photo(
+                    photo=upload,
+                    **common,
+                )
+
             elif kind == "video":
-                await bot.send_video(video=upload, **common)
+                await bot.send_video(
+                    video=upload,
+                    **common,
+                )
+
             else:
-                await bot.send_document(document=upload, **common)
+                await bot.send_document(
+                    document=upload,
+                    **common,
+                )
 
         except Exception as error:
-            # Only a confirmed size-related failure may trigger fallback.
-            # Other Bot API errors are surfaced; blindly forwarding then could
-            # duplicate a message if Telegram accepted the upload partially.
+            # Only confirmed size errors trigger fallback.
             if is_size_error(error):
                 await publish_via_telethon([message])
                 return
+
             raise
 
-    # The media is already published. If the separate long caption fails,
-    # do NOT fall back and resend the media; log the text failure only.
+    # Media is already published. Do not resend it if the separate
+    # long caption fails.
     if caption_too_long:
         try:
             await send_text_via_bot(message)
         except Exception:
             logger.exception(
-                "Медиа %s опубликовано, но не удалось отправить длинную подпись отдельным сообщением",
+                "Медиа %s опубликовано, но не удалось отправить "
+                "длинную подпись отдельным сообщением",
                 message.id,
             )
 
@@ -433,13 +492,13 @@ async def send_single_media(message):
 async def send_album(messages):
     ordered = sorted(messages, key=lambda item: item.id)
 
-    # Bot API media groups accept 2-10 items. Anything outside the supported
-    # shape is forwarded intact by Telethon.
+    # Bot API media groups accept 2-10 items.
     if not 2 <= len(ordered) <= 10:
         await publish_via_telethon(ordered)
         return
 
     kinds = [get_media_kind(m) for m in ordered]
+
     if any(kind not in ("photo", "video", "document") for kind in kinds):
         await publish_via_telethon(ordered)
         return
@@ -453,16 +512,23 @@ async def send_album(messages):
         return
 
     kind_set = set(kinds)
-    # Telegram does not permit mixing document-type items with photo/video
-    # items in one media group.
+
+    # Telegram does not permit mixing document-type items with
+    # photo/video items in one media group.
     if "document" in kind_set and len(kind_set) > 1:
         await publish_via_telethon(ordered)
         return
 
-    caption_message = next((m for m in ordered if m.message), None)
+    caption_message = next(
+        (m for m in ordered if m.message),
+        None,
+    )
+
     caption_text = caption_message.message if caption_message else ""
+
     caption_too_long = is_caption_too_long(caption_text)
     caption = "" if caption_too_long else caption_text
+
     caption_entities = (
         None
         if caption_too_long or not caption_message
@@ -471,31 +537,37 @@ async def send_album(messages):
 
     with tempfile.TemporaryDirectory(prefix="news_album_") as directory:
         media_items = []
+
         for index, message in enumerate(ordered):
             path = await download_media_to_path(message, directory)
             upload = FSInputFile(path)
+
             item_caption = caption if index == 0 else None
             item_entities = caption_entities if index == 0 else None
 
             kind = get_media_kind(message)
+
             if kind == "photo":
                 item = InputMediaPhoto(
                     media=upload,
                     caption=item_caption,
                     caption_entities=item_entities,
                 )
+
             elif kind == "video":
                 item = InputMediaVideo(
                     media=upload,
                     caption=item_caption,
                     caption_entities=item_entities,
                 )
+
             else:
                 item = InputMediaDocument(
                     media=upload,
                     caption=item_caption,
                     caption_entities=item_entities,
                 )
+
             media_items.append(item)
 
         try:
@@ -504,10 +576,12 @@ async def send_album(messages):
                 message_thread_id=NEWS_TOPIC_ID,
                 media=media_items,
             )
+
         except Exception as error:
             if is_size_error(error):
                 await publish_via_telethon(ordered)
                 return
+
             raise
 
     if caption_too_long and caption_message:
@@ -515,7 +589,8 @@ async def send_album(messages):
             await send_text_via_bot(caption_message)
         except Exception:
             logger.exception(
-                "Альбом %s опубликован, но не удалось отправить длинную подпись отдельно",
+                "Альбом %s опубликован, но не удалось отправить "
+                "длинную подпись отдельно",
                 ordered[0].grouped_id,
             )
 
@@ -526,14 +601,18 @@ async def send_album(messages):
 
 def make_news_key(messages) -> str:
     ordered = sorted(messages, key=lambda item: item.id)
+
     grouped_id = getattr(ordered[0], "grouped_id", None)
+
     if grouped_id:
         return f"album:{source_channel_id}:{grouped_id}"
+
     return f"message:{source_channel_id}:{ordered[0].id}"
 
 
 async def publish_news(messages):
     ordered = sorted(messages, key=lambda item: item.id)
+
     if not ordered:
         return
 
@@ -545,26 +624,41 @@ async def publish_news(messages):
 
 async def process_automatic_news(messages):
     ordered = sorted(messages, key=lambda item: item.id)
+
     if not ordered:
         return
 
     key = make_news_key(ordered)
+
     if key in auto_keys_in_progress:
         return
 
     auto_keys_in_progress.add(key)
+
     try:
         async with publish_lock:
             if was_published(key):
-                logger.info("Автоматический дубль пропущен: %s", key)
+                logger.info(
+                    "Автоматический дубль пропущен: %s",
+                    key,
+                )
                 return
 
             await publish_news(ordered)
+
             mark_published(key)
-            logger.info("Автоматическая публикация завершена: %s", key)
+
+            logger.info(
+                "Автоматическая публикация завершена: %s",
+                key,
+            )
 
     except Exception:
-        logger.exception("Ошибка автоматической публикации %s", key)
+        logger.exception(
+            "Ошибка автоматической публикации %s",
+            key,
+        )
+
     finally:
         auto_keys_in_progress.discard(key)
 
@@ -578,6 +672,7 @@ async def handle_source_message(event):
     # Album events are processed once by the Album handler.
     if event.message.grouped_id:
         return
+
     await process_automatic_news([event.message])
 
 
@@ -585,6 +680,7 @@ async def handle_source_message(event):
 async def handle_source_album(event):
     if not event.messages:
         return
+
     await process_automatic_news(event.messages)
 
 
@@ -598,16 +694,31 @@ async def is_group_admin(user_id: int) -> bool:
             chat_id=TARGET_CHAT_ID,
             user_id=user_id,
         )
-        status = getattr(member.status, "value", member.status)
+
+        status = getattr(
+            member.status,
+            "value",
+            member.status,
+        )
+
         return status in ("administrator", "creator")
+
     except TelegramAPIError:
-        logger.exception("Не удалось проверить права пользователя %s", user_id)
+        logger.exception(
+            "Не удалось проверить права пользователя %s",
+            user_id,
+        )
         return False
 
 
 async def get_latest_source_post():
-    """Get latest channel post; if it is an album, collect its complete group."""
-    latest_messages = await client.get_messages(source_entity, limit=30)
+    """Get latest channel post; if album, collect its complete group."""
+
+    latest_messages = await client.get_messages(
+        source_entity,
+        limit=30,
+    )
+
     if not latest_messages:
         return []
 
@@ -615,16 +726,23 @@ async def get_latest_source_post():
         (m for m in latest_messages if m.message or m.media),
         None,
     )
+
     if latest is None:
         return []
 
     if latest.grouped_id:
-        album = [m for m in latest_messages if m.grouped_id == latest.grouped_id]
-        # If the album straddles the 30-message lookback boundary, fetch
-        # neighboring messages around its first known member.
+        album = [
+            m
+            for m in latest_messages
+            if m.grouped_id == latest.grouped_id
+        ]
+
+        # If the album straddles the 30-message lookback boundary,
+        # fetch neighboring messages around its first known member.
         if album:
             min_id = min(m.id for m in album)
             max_id = max(m.id for m in album)
+
             if len(album) < 10:
                 nearby = await client.get_messages(
                     source_entity,
@@ -632,12 +750,22 @@ async def get_latest_source_post():
                     max_id=min_id + 10,
                     limit=30,
                 )
-                by_id = {m.id: m for m in album}
+
+                by_id = {
+                    m.id: m
+                    for m in album
+                }
+
                 for item in nearby:
                     if item.grouped_id == latest.grouped_id:
                         by_id[item.id] = item
+
                 album = list(by_id.values())
-        return sorted(album, key=lambda item: item.id)
+
+        return sorted(
+            album,
+            key=lambda item: item.id,
+        )
 
     return [latest]
 
@@ -647,65 +775,113 @@ async def handle_check(event):
     global check_in_progress
 
     text = event.raw_text or ""
+
     if not text.strip():
         return
+
     if get_topic_id(event) != NEWS_TOPIC_ID:
         return
 
     first_token = text.strip().split(maxsplit=1)[0]
     command = first_token.split("@", 1)[0].lower()
+
     if command != "/check":
         return
 
-    # A duplicate request is deleted and discarded immediately; it is never
-    # queued behind the current publication.
+    logger.info(
+        "Получена команда /check: message_id=%s, "
+        "user_id=%s, topic_id=%s",
+        event.id,
+        event.sender_id,
+        get_topic_id(event),
+    )
+
+    # Duplicate requests are deleted and discarded immediately.
     if check_in_progress or publish_lock.locked():
         with suppress(Exception):
             await event.delete()
-        logger.warning("Повторная /check пропущена: публикация уже выполняется")
+
+        logger.warning(
+            "Повторная /check пропущена: публикация уже выполняется"
+        )
         return
 
     check_in_progress = True
 
-    # Delete the accepted command before any network work/admin check.
+    # Delete the accepted command before network work/admin check.
     try:
         await event.delete()
+
     except Exception:
-        logger.exception("Не удалось удалить команду /check")
+        logger.exception(
+            "Не удалось удалить команду /check"
+        )
         check_in_progress = False
         return
 
     try:
         user_id = event.sender_id
+
         if not user_id:
-            logger.warning("/check без определённого отправителя")
+            logger.warning(
+                "/check без определённого отправителя"
+            )
             return
 
         if not await is_group_admin(user_id):
-            logger.warning("Неавторизованная попытка /check. User ID: %s", user_id)
+            logger.warning(
+                "Неавторизованная попытка /check. User ID: %s",
+                user_id,
+            )
             return
 
-        # No waiting queue: if another publication acquired the lock while
-        # the admin check was running, this manual request is discarded.
+        logger.info(
+            "Права администратора для /check подтверждены. "
+            "User ID: %s",
+            user_id,
+        )
+
+        # No waiting queue.
         if publish_lock.locked():
-            logger.warning("/check пропущена: в это время началась другая публикация")
+            logger.warning(
+                "/check пропущена: в это время началась другая публикация"
+            )
             return
 
         await publish_lock.acquire()
+
         try:
             latest_post = await get_latest_source_post()
+
             if not latest_post:
-                logger.warning("В источнике нет публикаций для /check")
+                logger.warning(
+                    "В источнике нет публикаций для /check"
+                )
                 return
+
+            logger.info(
+                "Последняя публикация источника получена для /check; "
+                "IDs=%s",
+                [message.id for message in latest_post],
+            )
 
             # Manual /check deliberately bypasses automatic deduplication.
             await publish_news(latest_post)
-            logger.info("Принудительная публикация /check завершена. User ID: %s", user_id)
+
+            logger.info(
+                "Принудительная публикация /check завершена. "
+                "User ID: %s",
+                user_id,
+            )
+
         finally:
             publish_lock.release()
 
     except Exception:
-        logger.exception("Ошибка обработки /check")
+        logger.exception(
+            "Ошибка обработки /check"
+        )
+
     finally:
         check_in_progress = False
 
@@ -720,30 +896,69 @@ async def main():
     logger.info("Запуск Telethon Worker...")
 
     await client.start()
+
     telethon_me = await client.get_me()
-    logger.info("Telethon подключён. Аккаунт ID: %s", telethon_me.id)
+
+    logger.info(
+        "Telethon подключён. Аккаунт ID: %s",
+        telethon_me.id,
+    )
 
     bot_me = await bot.get_me()
-    logger.info("Bot API подключён: @%s, ID: %s", bot_me.username, bot_me.id)
+
+    logger.info(
+        "Bot API подключён: @%s, ID: %s",
+        bot_me.username,
+        bot_me.id,
+    )
 
     source_entity = await client.get_entity(SOURCE_CHANNEL)
-    source_channel_id = getattr(source_entity, "channel_id", None) or source_entity.id
-    logger.info("Источник новостей: @%s, ID: %s", SOURCE_CHANNEL, source_channel_id)
+
+    source_channel_id = (
+        getattr(source_entity, "channel_id", None)
+        or source_entity.id
+    )
+
+    logger.info(
+        "Источник новостей: @%s, ID: %s",
+        SOURCE_CHANNEL,
+        source_channel_id,
+    )
 
     await client.get_entity(TARGET_CHAT_ID)
-    logger.info("Целевая группа: %s", TARGET_CHAT_ID)
-    logger.info("Тема новостей: %s", NEWS_TOPIC_ID)
-    logger.info("Исключённая тема модерации: %s", IGNORE_TOPIC_ID)
+
+    logger.info(
+        "Целевая группа: %s",
+        TARGET_CHAT_ID,
+    )
+
+    logger.info(
+        "Тема новостей: %s",
+        NEWS_TOPIC_ID,
+    )
+
+    logger.info(
+        "Исключённая тема модерации: %s",
+        IGNORE_TOPIC_ID,
+    )
+
     logger.info("Модерация @BrAssGay включена")
     logger.info("Автоматические новости и /check включены")
-    logger.info("Публикация: Bot API с резервным Telethon для больших файлов")
+
+    logger.info(
+        "Публикация: Bot API с резервным Telethon для больших файлов"
+    )
 
     try:
         await client.run_until_disconnected()
+
     finally:
         logger.info("Остановка Telethon Worker...")
+
         await bot.session.close()
+
         _db.close()
+
         if client.is_connected():
             await client.disconnect()
 
@@ -751,5 +966,8 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Работа Telethon Worker завершена")
+        logger.info(
+            "Работа Telethon Worker завершена"
+        )
