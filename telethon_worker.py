@@ -3,43 +3,14 @@ import asyncio
 import logging
 import os
 import sqlite3
-import tempfile
-from pathlib import Path
 from contextlib import suppress
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import (
-    DocumentAttributeAnimated,
-    DocumentAttributeVideo,
-    MessageEntityBold,
-    MessageEntityItalic,
-    MessageEntityUnderline,
-    MessageEntityStrike,
-    MessageEntityCode,
-    MessageEntityPre,
-    MessageEntityTextUrl,
-    MessageEntityUrl,
-    MessageEntityMention,
-    MessageEntityHashtag,
-    MessageEntityCashtag,
-    MessageEntityBotCommand,
-    MessageEntityEmail,
-    MessageEntityPhone,
-    MessageEntitySpoiler,
-    MessageEntityCustomEmoji,
-)
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramAPIError, TelegramEntityTooLarge
-from aiogram.types import (
-    MessageEntity,
-    InputMediaPhoto,
-    InputMediaVideo,
-    InputMediaDocument,
-    FSInputFile,
-)
+from aiogram.exceptions import TelegramAPIError
 
 
 # ============================================================
@@ -56,7 +27,11 @@ API_ID = int(os.getenv("API_ID", "38378220"))
 API_HASH = os.getenv("API_HASH", "").strip()
 TELETHON_SESSION = os.getenv("TELETHON_SESSION", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL", "br_dev").strip().lstrip("@")
+
+SOURCE_CHANNEL = os.getenv(
+    "SOURCE_CHANNEL",
+    "br_dev",
+).strip().lstrip("@")
 
 TARGET_CHAT_ID = -1002165454770
 TARGET_BOT_ID = 8878352778
@@ -64,19 +39,25 @@ TARGET_BOT_ID = 8878352778
 NEWS_TOPIC_ID = 25114
 IGNORE_TOPIC_ID = 18600
 
-DATABASE_PATH = os.getenv("NEWS_DATABASE", "news_state.sqlite3")
-
-PHOTO_LIMIT = 10 * 1024 * 1024
-GENERAL_FILE_LIMIT = 50 * 1024 * 1024
+DATABASE_PATH = os.getenv(
+    "NEWS_DATABASE",
+    "news_state.sqlite3",
+)
 
 if not API_HASH or not TELETHON_SESSION:
-    raise RuntimeError("Не заданы API_HASH или TELETHON_SESSION")
+    raise RuntimeError(
+        "Не заданы API_HASH или TELETHON_SESSION"
+    )
 
 if not BOT_TOKEN:
-    raise RuntimeError("Не задан BOT_TOKEN")
+    raise RuntimeError(
+        "Не задан BOT_TOKEN"
+    )
 
 if not SOURCE_CHANNEL:
-    raise RuntimeError("Не задан SOURCE_CHANNEL")
+    raise RuntimeError(
+        "Не задан SOURCE_CHANNEL"
+    )
 
 
 # ============================================================
@@ -89,6 +70,8 @@ client = TelegramClient(
     API_HASH,
 )
 
+# Bot API теперь используется только для проверки
+# прав администратора при выполнении команды /check.
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=None),
@@ -124,7 +107,12 @@ _db.commit()
 
 def was_published(news_key: str) -> bool:
     row = _db.execute(
-        "SELECT 1 FROM published_news WHERE news_key = ? LIMIT 1",
+        """
+        SELECT 1
+        FROM published_news
+        WHERE news_key = ?
+        LIMIT 1
+        """,
         (news_key,),
     ).fetchone()
 
@@ -133,98 +121,104 @@ def was_published(news_key: str) -> bool:
 
 def mark_published(news_key: str) -> None:
     _db.execute(
-        "INSERT OR IGNORE INTO published_news (news_key) VALUES (?)",
+        """
+        INSERT OR IGNORE INTO published_news (news_key)
+        VALUES (?)
+        """,
         (news_key,),
     )
     _db.commit()
 
 
 # ============================================================
-# 4. RUNTIME STATE AND ENTITY CONVERSION
+# 4. RUNTIME STATE
 # ============================================================
 
 publish_lock = asyncio.Lock()
+
 check_in_progress = False
+
 auto_keys_in_progress = set()
 
 
-ENTITY_TYPES = {
-    MessageEntityBold: "bold",
-    MessageEntityItalic: "italic",
-    MessageEntityUnderline: "underline",
-    MessageEntityStrike: "strikethrough",
-    MessageEntityCode: "code",
-    MessageEntityPre: "pre",
-    MessageEntityTextUrl: "text_link",
-    MessageEntityUrl: "url",
-    MessageEntityMention: "mention",
-    MessageEntityHashtag: "hashtag",
-    MessageEntityCashtag: "cashtag",
-    MessageEntityBotCommand: "bot_command",
-    MessageEntityEmail: "email",
-    MessageEntityPhone: "phone_number",
-    MessageEntitySpoiler: "spoiler",
-    MessageEntityCustomEmoji: "custom_emoji",
-}
-
-
-def convert_entities(entities):
-    if not entities:
-        return None
-
-    converted = []
-
-    for entity in entities:
-        entity_type = ENTITY_TYPES.get(type(entity))
-
-        if not entity_type:
-            continue
-
-        kwargs = {
-            "type": entity_type,
-            "offset": entity.offset,
-            "length": entity.length,
-        }
-
-        if isinstance(entity, MessageEntityTextUrl):
-            kwargs["url"] = entity.url
-
-        elif isinstance(entity, MessageEntityPre) and entity.language:
-            kwargs["language"] = entity.language
-
-        elif isinstance(entity, MessageEntityCustomEmoji):
-            kwargs["custom_emoji_id"] = str(entity.document_id)
-
-        converted.append(MessageEntity(**kwargs))
-
-    return converted or None
-
+# ============================================================
+# 5. TEXT HELPERS
+# ============================================================
 
 def utf16_length(value: str) -> int:
-    return len(value.encode("utf-16-le")) // 2
+    return len(
+        (value or "").encode("utf-16-le")
+    ) // 2
 
 
 def is_caption_too_long(text: str) -> bool:
     return utf16_length(text or "") > 1024
 
 
+def get_media_kind(message):
+    if message.photo:
+        return "photo"
+
+    document = getattr(
+        message,
+        "document",
+        None,
+    )
+
+    if document:
+        from telethon.tl.types import (
+            DocumentAttributeAnimated,
+            DocumentAttributeVideo,
+        )
+
+        attributes = document.attributes or []
+
+        if any(
+            isinstance(attribute, DocumentAttributeAnimated)
+            for attribute in attributes
+        ):
+            return "animation"
+
+        if any(
+            isinstance(attribute, DocumentAttributeVideo)
+            for attribute in attributes
+        ):
+            return "video"
+
+        return "document"
+
+    return None
+
+
 # ============================================================
-# 5. TOPIC DETECTION AND ORIGINAL MODERATION
+# 6. TOPIC DETECTION AND MODERATION
 # ============================================================
 
 def get_topic_id(event):
     message = event.message
-    reply = getattr(message, "reply_to", None)
+    reply = getattr(
+        message,
+        "reply_to",
+        None,
+    )
 
     if not reply:
         return None
 
-    top_id = getattr(reply, "reply_to_top_id", None)
+    top_id = getattr(
+        reply,
+        "reply_to_top_id",
+        None,
+    )
 
     if top_id:
         return top_id
 
-    reply_id = getattr(reply, "reply_to_msg_id", None)
+    reply_id = getattr(
+        reply,
+        "reply_to_msg_id",
+        None,
+    )
 
     if reply_id:
         return reply_id
@@ -244,14 +238,16 @@ async def moderate_brassgay(event):
 
     if topic_id is None:
         logger.warning(
-            "Не удалось определить тему сообщения %s. Удаление отменено.",
+            "Не удалось определить тему сообщения %s. "
+            "Удаление отменено.",
             event.id,
         )
         return
 
     if topic_id == IGNORE_TOPIC_ID:
         logger.info(
-            "Тема %s исключена. Сообщение %s оставлено.",
+            "Сообщение @BrAssGay оставлено: "
+            "исключённая тема %s, message_id=%s",
             IGNORE_TOPIC_ID,
             event.id,
         )
@@ -261,109 +257,21 @@ async def moderate_brassgay(event):
         await event.delete()
 
         logger.info(
-            "Удалено сообщение @BrAssGay: %s, тема: %s",
+            "Удалено сообщение @BrAssGay: "
+            "message_id=%s, topic_id=%s",
             event.id,
             topic_id,
         )
 
     except Exception:
-        logger.exception("Ошибка удаления сообщения @BrAssGay")
-
-
-# ============================================================
-# 6. SOURCE MESSAGE / MEDIA HELPERS
-# ============================================================
-
-def get_media_kind(message):
-    if message.photo:
-        return "photo"
-
-    document = getattr(message, "document", None)
-
-    if document:
-        attrs = document.attributes or []
-
-        if any(
-            isinstance(a, DocumentAttributeAnimated)
-            for a in attrs
-        ):
-            return "animation"
-
-        if any(
-            isinstance(a, DocumentAttributeVideo)
-            for a in attrs
-        ):
-            return "video"
-
-        return "document"
-
-    return None
-
-
-def get_media_size(message) -> int:
-    try:
-        return int(message.file.size or 0) if message.file else 0
-    except Exception:
-        return 0
-
-
-def exceeds_known_upload_limit(message) -> bool:
-    kind = get_media_kind(message)
-    size = get_media_size(message)
-
-    if not kind or not size:
-        return False
-
-    if kind == "photo":
-        return size > PHOTO_LIMIT
-
-    return size > GENERAL_FILE_LIMIT
-
-
-def is_size_error(error: Exception) -> bool:
-    if isinstance(error, TelegramEntityTooLarge):
-        return True
-
-    message = str(error).lower()
-
-    phrases = (
-        "file is too big",
-        "file too large",
-        "request entity too large",
-        "entity too large",
-    )
-
-    return any(phrase in message for phrase in phrases)
-
-
-async def download_media_to_path(message, directory: str) -> str:
-    extension = ".bin"
-
-    try:
-        if message.file and message.file.ext:
-            extension = message.file.ext
-    except Exception:
-        pass
-
-    path = str(
-        Path(directory) / f"{message.id}{extension}"
-    )
-
-    downloaded = await client.download_media(
-        message,
-        file=path,
-    )
-
-    if not downloaded:
-        raise RuntimeError(
-            f"Не удалось скачать медиа сообщения {message.id}"
+        logger.exception(
+            "Ошибка удаления сообщения @BrAssGay"
         )
 
-    return path
-
 
 # ============================================================
-# 7. TELETHON FALLBACK — REAL COPYING, NOT FORWARDING
+# 7. TELETHON PUBLICATION
+#    DIRECT MEDIA REUSE — NO LOCAL DOWNLOAD
 # ============================================================
 
 async def send_telethon_text(message):
@@ -376,26 +284,86 @@ async def send_telethon_text(message):
         entity=TARGET_CHAT_ID,
         message=text,
         reply_to=NEWS_TOPIC_ID,
-        formatting_entities=message.entities,
+        formatting_entities=message.entities or None,
         parse_mode=None,
+        link_preview=True,
     )
 
 
-async def publish_via_telethon(messages):
+async def send_media_caption_separately(message):
     """
-    Скачивает исходные файлы и загружает их заново в целевую группу.
-
-    Это НЕ пересылка:
-    - нет ForwardMessagesRequest;
-    - нет отметки «Переслано из»;
-    - нет ссылки на исходный канал;
-    - медиа загружается как новая публикация.
+    Отправляет длинную подпись отдельным сообщением.
+    Ошибка подписи не приводит к повторной отправке медиа.
     """
 
-    if not source_entity:
-        raise RuntimeError(
-            "Источник новостей ещё не инициализирован"
+    if not message.message:
+        return
+
+    try:
+        await send_telethon_text(message)
+
+    except Exception:
+        logger.exception(
+            "Медиа %s опубликовано, "
+            "но отдельная подпись не отправлена",
+            message.id,
         )
+
+
+async def publish_single_via_telethon(message):
+    """
+    Публикует одно сообщение от имени личного аккаунта.
+
+    Важно:
+    - используется исходный объект message.media;
+    - download_media не вызывается;
+    - локальные временные файлы не создаются;
+    - это новая публикация, а не пересылка.
+    """
+
+    text = message.message or ""
+
+    if not message.media:
+        if text:
+            await send_telethon_text(message)
+
+        return
+
+    caption_too_long = is_caption_too_long(text)
+
+    kwargs = {
+        "entity": TARGET_CHAT_ID,
+        "file": message.media,
+        "reply_to": NEWS_TOPIC_ID,
+        "parse_mode": None,
+    }
+
+    if text and not caption_too_long:
+        kwargs["caption"] = text
+        kwargs["formatting_entities"] = (
+            message.entities or None
+        )
+
+    await client.send_file(**kwargs)
+
+    if caption_too_long:
+        await send_media_caption_separately(message)
+
+    logger.info(
+        "Публикация отправлена через Telethon "
+        "от имени личного аккаунта. ID=%s",
+        message.id,
+    )
+
+
+async def publish_album_via_telethon(messages):
+    """
+    Публикует альбом через исходные Telegram media objects.
+
+    Обычные альбомы отправляются одним send_file.
+    Альбомы со смешанными типами файлов отправляются
+    отдельными сообщениями в исходном порядке.
+    """
 
     ordered = sorted(
         messages,
@@ -405,362 +373,17 @@ async def publish_via_telethon(messages):
     if not ordered:
         return
 
-    logger.warning(
-        "Начинаю КОПИРОВАНИЕ через Telethon; IDs=%s",
-        [m.id for m in ordered],
-    )
-
-    with tempfile.TemporaryDirectory(
-        prefix="telethon_copy_"
-    ) as directory:
-
-        paths = []
-
-        for message in ordered:
-            if not message.media:
-                paths.append(None)
-                continue
-
-            path = await download_media_to_path(
-                message,
-                directory,
-            )
-
-            paths.append(path)
-
-        # ----------------------------------------------------
-        # SINGLE MESSAGE
-        # ----------------------------------------------------
-
-        if len(ordered) == 1:
-            message = ordered[0]
-            path = paths[0]
-
-            if not path:
-                await send_telethon_text(message)
-                return
-
-            caption = message.message or ""
-            caption_too_long = is_caption_too_long(caption)
-
-            kwargs = {
-                "entity": TARGET_CHAT_ID,
-                "file": path,
-                "reply_to": NEWS_TOPIC_ID,
-                "parse_mode": None,
-            }
-
-            if caption and not caption_too_long:
-                kwargs["caption"] = caption
-                kwargs["formatting_entities"] = message.entities
-
-            kind = get_media_kind(message)
-
-            if kind == "document":
-                kwargs["force_document"] = True
-
-            if kind == "video":
-                kwargs["supports_streaming"] = True
-
-            document = getattr(message, "document", None)
-
-            if document:
-                kwargs["attributes"] = document.attributes
-
-                if message.file and message.file.mime_type:
-                    kwargs["mime_type"] = message.file.mime_type
-
-            await client.send_file(**kwargs)
-
-            if caption_too_long:
-                await send_telethon_text(message)
-
-            logger.info(
-                "Копия публикации отправлена через Telethon "
-                "в тему %s; ID=%s",
-                NEWS_TOPIC_ID,
-                message.id,
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # ALBUM
-        # ----------------------------------------------------
-
-        kinds = [
-            get_media_kind(message)
-            for message in ordered
-        ]
-
-        caption_message = next(
-            (
-                message
-                for message in ordered
-                if message.message
-            ),
-            None,
-        )
-
-        caption = (
-            caption_message.message
-            if caption_message
-            else ""
-        )
-
-        caption_too_long = is_caption_too_long(caption)
-
-        # Mixed document/photo/video groups are uploaded
-        # as separate new messages to avoid Telegram album restrictions.
-        has_documents = "document" in kinds
-        has_other_media = any(
-            kind in ("photo", "video", "animation")
-            for kind in kinds
-        )
-
-        mixed_album = has_documents and has_other_media
-
-        if mixed_album:
-            logger.info(
-                "Альбом содержит разные типы файлов. "
-                "Копирую элементы отдельно в исходном порядке."
-            )
-
-            for index, message in enumerate(ordered):
-                path = paths[index]
-
-                if not path:
-                    continue
-
-                item_caption = message.message or ""
-                item_caption_too_long = is_caption_too_long(
-                    item_caption
-                )
-
-                kwargs = {
-                    "entity": TARGET_CHAT_ID,
-                    "file": path,
-                    "reply_to": NEWS_TOPIC_ID,
-                    "parse_mode": None,
-                }
-
-                if item_caption and not item_caption_too_long:
-                    kwargs["caption"] = item_caption
-                    kwargs["formatting_entities"] = message.entities
-
-                kind = get_media_kind(message)
-
-                if kind == "document":
-                    kwargs["force_document"] = True
-
-                if kind == "video":
-                    kwargs["supports_streaming"] = True
-
-                document = getattr(message, "document", None)
-
-                if document:
-                    kwargs["attributes"] = document.attributes
-
-                    if message.file and message.file.mime_type:
-                        kwargs["mime_type"] = message.file.mime_type
-
-                await client.send_file(**kwargs)
-
-                if item_caption_too_long:
-                    await send_telethon_text(message)
-
-        else:
-            # Normal photo/video album or document album.
-            media_paths = [
-                path
-                for path in paths
-                if path
-            ]
-
-            if not media_paths:
-                return
-
-            kwargs = {
-                "entity": TARGET_CHAT_ID,
-                "file": media_paths,
-                "reply_to": NEWS_TOPIC_ID,
-                "parse_mode": None,
-            }
-
-            if caption and not caption_too_long:
-                kwargs["caption"] = caption
-                kwargs["formatting_entities"] = (
-                    caption_message.entities
-                )
-
-            if kinds and all(
-                kind == "document"
-                for kind in kinds
-            ):
-                kwargs["force_document"] = True
-
-            await client.send_file(**kwargs)
-
-            if caption_too_long and caption_message:
-                await send_telethon_text(caption_message)
-
-        logger.info(
-            "Копирование альбома через Telethon завершено "
-            "в теме %s; IDs=%s",
-            NEWS_TOPIC_ID,
-            [m.id for m in ordered],
-        )
-
-
-# ============================================================
-# 8. BOT API TEXT AND SINGLE MEDIA
-# ============================================================
-
-async def send_text_via_bot(message):
-    text = message.message or ""
-
-    if not text:
-        return
-
-    await bot.send_message(
-        chat_id=TARGET_CHAT_ID,
-        message_thread_id=NEWS_TOPIC_ID,
-        text=text,
-        entities=convert_entities(message.entities),
-    )
-
-
-async def send_single_media(message):
-    kind = get_media_kind(message)
-
-    if not kind:
-        if message.media:
-            await publish_via_telethon([message])
-        else:
-            await send_text_via_bot(message)
-
-        return
-
-    if kind == "animation" or exceeds_known_upload_limit(message):
-        await publish_via_telethon([message])
-        return
-
-    original_caption = message.message or ""
-
-    caption_too_long = is_caption_too_long(
-        original_caption
-    )
-
-    caption = (
-        ""
-        if caption_too_long
-        else original_caption
-    )
-
-    caption_entities = (
-        None
-        if caption_too_long
-        else convert_entities(message.entities)
-    )
-
-    with tempfile.TemporaryDirectory(
-        prefix="news_"
-    ) as directory:
-
-        path = await download_media_to_path(
-            message,
-            directory,
-        )
-
-        upload = FSInputFile(path)
-
-        try:
-            common = {
-                "chat_id": TARGET_CHAT_ID,
-                "message_thread_id": NEWS_TOPIC_ID,
-                "caption": caption or None,
-                "caption_entities": caption_entities,
-            }
-
-            if kind == "photo":
-                await bot.send_photo(
-                    photo=upload,
-                    **common,
-                )
-
-            elif kind == "video":
-                await bot.send_video(
-                    video=upload,
-                    **common,
-                )
-
-            else:
-                await bot.send_document(
-                    document=upload,
-                    **common,
-                )
-
-        except Exception as error:
-            if is_size_error(error):
-                logger.warning(
-                    "Bot API вернул ошибку размера. "
-                    "Перехожу на копирование через Telethon."
-                )
-
-                await publish_via_telethon([message])
-                return
-
-            raise
-
-    if caption_too_long:
-        try:
-            await send_text_via_bot(message)
-
-        except Exception:
-            logger.exception(
-                "Медиа %s опубликовано, но длинная подпись "
-                "не отправлена отдельным сообщением",
-                message.id,
-            )
-
-
-# ============================================================
-# 9. BOT API ALBUMS
-# ============================================================
-
-async def send_album(messages):
-    ordered = sorted(
-        messages,
-        key=lambda item: item.id,
-    )
-
-    if not 2 <= len(ordered) <= 10:
-        await publish_via_telethon(ordered)
-        return
-
-    kinds = [
-        get_media_kind(message)
+    media_messages = [
+        message
         for message in ordered
+        if message.media
     ]
 
-    if any(
-        kind not in ("photo", "video", "document")
-        for kind in kinds
-    ):
-        await publish_via_telethon(ordered)
-        return
+    if not media_messages:
+        for message in ordered:
+            if message.message:
+                await send_telethon_text(message)
 
-    if any(
-        exceeds_known_upload_limit(message)
-        for message in ordered
-    ):
-        await publish_via_telethon(ordered)
-        return
-
-    kind_set = set(kinds)
-
-    if "document" in kind_set and len(kind_set) > 1:
-        await publish_via_telethon(ordered)
         return
 
     caption_message = next(
@@ -772,111 +395,138 @@ async def send_album(messages):
         None,
     )
 
-    caption_text = (
+    caption = (
         caption_message.message
         if caption_message
         else ""
     )
 
     caption_too_long = is_caption_too_long(
-        caption_text
+        caption
     )
 
-    caption = (
-        ""
-        if caption_too_long
-        else caption_text
+    kinds = [
+        get_media_kind(message)
+        for message in media_messages
+    ]
+
+    has_documents = "document" in kinds
+
+    has_other_media = any(
+        kind in ("photo", "video", "animation")
+        for kind in kinds
     )
 
-    caption_entities = (
-        None
-        if caption_too_long or not caption_message
-        else convert_entities(caption_message.entities)
+    mixed_album = (
+        has_documents and has_other_media
     )
 
-    with tempfile.TemporaryDirectory(
-        prefix="news_album_"
-    ) as directory:
+    # --------------------------------------------------------
+    # MIXED ALBUM
+    # --------------------------------------------------------
 
-        media_items = []
+    if mixed_album:
+        logger.info(
+            "Обнаружен альбом со смешанными типами файлов. "
+            "Отправляю элементы отдельно."
+        )
 
-        for index, message in enumerate(ordered):
-            path = await download_media_to_path(
-                message,
-                directory,
+        for message in ordered:
+            if not message.media:
+                if message.message:
+                    await send_telethon_text(message)
+
+                continue
+
+            item_text = message.message or ""
+            item_caption_too_long = is_caption_too_long(
+                item_text
             )
 
-            upload = FSInputFile(path)
+            kwargs = {
+                "entity": TARGET_CHAT_ID,
+                "file": message.media,
+                "reply_to": NEWS_TOPIC_ID,
+                "parse_mode": None,
+            }
 
-            item_caption = (
-                caption
-                if index == 0
-                else None
-            )
-
-            item_entities = (
-                caption_entities
-                if index == 0
-                else None
-            )
-
-            kind = get_media_kind(message)
-
-            if kind == "photo":
-                item = InputMediaPhoto(
-                    media=upload,
-                    caption=item_caption,
-                    caption_entities=item_entities,
+            if item_text and not item_caption_too_long:
+                kwargs["caption"] = item_text
+                kwargs["formatting_entities"] = (
+                    message.entities or None
                 )
 
-            elif kind == "video":
-                item = InputMediaVideo(
-                    media=upload,
-                    caption=item_caption,
-                    caption_entities=item_entities,
+            await client.send_file(**kwargs)
+
+            if item_caption_too_long:
+                await send_media_caption_separately(
+                    message
                 )
 
-            else:
-                item = InputMediaDocument(
-                    media=upload,
-                    caption=item_caption,
-                    caption_entities=item_entities,
-                )
+        logger.info(
+            "Смешанный альбом опубликован. IDs=%s",
+            [message.id for message in ordered],
+        )
 
-            media_items.append(item)
+        return
 
-        try:
-            await bot.send_media_group(
-                chat_id=TARGET_CHAT_ID,
-                message_thread_id=NEWS_TOPIC_ID,
-                media=media_items,
-            )
+    # --------------------------------------------------------
+    # NORMAL ALBUM
+    # --------------------------------------------------------
 
-        except Exception as error:
-            if is_size_error(error):
-                logger.warning(
-                    "Bot API не принял альбом из-за размера. "
-                    "Перехожу на копирование через Telethon."
-                )
+    media = [
+        message.media
+        for message in media_messages
+    ]
 
-                await publish_via_telethon(ordered)
-                return
+    kwargs = {
+        "entity": TARGET_CHAT_ID,
+        "file": media,
+        "reply_to": NEWS_TOPIC_ID,
+        "parse_mode": None,
+    }
 
-            raise
+    if caption and not caption_too_long:
+        kwargs["caption"] = caption
+        kwargs["formatting_entities"] = (
+            caption_message.entities or None
+        )
+
+    await client.send_file(**kwargs)
 
     if caption_too_long and caption_message:
-        try:
-            await send_text_via_bot(caption_message)
+        await send_media_caption_separately(
+            caption_message
+        )
 
-        except Exception:
-            logger.exception(
-                "Альбом опубликован, но длинная подпись "
-                "не отправлена отдельно"
-            )
+    logger.info(
+        "Альбом опубликован через Telethon "
+        "от имени личного аккаунта. IDs=%s",
+        [message.id for message in ordered],
+    )
+
+
+async def publish_news(messages):
+    ordered = sorted(
+        messages,
+        key=lambda item: item.id,
+    )
+
+    if not ordered:
+        return
+
+    if len(ordered) == 1:
+        await publish_single_via_telethon(
+            ordered[0]
+        )
+    else:
+        await publish_album_via_telethon(
+            ordered
+        )
 
 
 # ============================================================
-# 10. COMMON PUBLICATION AND DEDUPLICATION
+# 8. NEWS KEYS AND AUTOMATIC PUBLICATION
 # ============================================================
 
 def make_news_key(messages) -> str:
@@ -901,21 +551,6 @@ def make_news_key(messages) -> str:
     )
 
 
-async def publish_news(messages):
-    ordered = sorted(
-        messages,
-        key=lambda item: item.id,
-    )
-
-    if not ordered:
-        return
-
-    if len(ordered) == 1:
-        await send_single_media(ordered[0])
-    else:
-        await send_album(ordered)
-
-
 async def process_automatic_news(messages):
     ordered = sorted(
         messages,
@@ -928,6 +563,10 @@ async def process_automatic_news(messages):
     key = make_news_key(ordered)
 
     if key in auto_keys_in_progress:
+        logger.info(
+            "Публикация уже обрабатывается: %s",
+            key,
+        )
         return
 
     auto_keys_in_progress.add(key)
@@ -941,6 +580,11 @@ async def process_automatic_news(messages):
                 )
                 return
 
+            logger.info(
+                "Начинаю автоматическую публикацию: %s",
+                key,
+            )
+
             await publish_news(ordered)
 
             mark_published(key)
@@ -952,7 +596,7 @@ async def process_automatic_news(messages):
 
     except Exception:
         logger.exception(
-            "Ошибка автоматической публикации %s",
+            "Ошибка автоматической публикации: %s",
             key,
         )
 
@@ -961,7 +605,7 @@ async def process_automatic_news(messages):
 
 
 # ============================================================
-# 11. SOURCE CHANNEL HANDLERS
+# 9. SOURCE CHANNEL HANDLERS
 # ============================================================
 
 @client.on(
@@ -989,7 +633,7 @@ async def handle_source_album(event):
 
 
 # ============================================================
-# 12. /check COMMAND
+# 10. /CHECK — ADMIN ONLY, FORCE PUBLISH
 # ============================================================
 
 async def is_group_admin(user_id: int) -> bool:
@@ -1021,8 +665,9 @@ async def is_group_admin(user_id: int) -> bool:
 
 async def get_latest_source_post():
     """
-    Получает последнюю публикацию.
-    Если это альбом — собирает все его элементы.
+    Получает последнюю публикацию источника.
+    Если последняя публикация — альбом,
+    собирает все его элементы.
     """
 
     latest_messages = await client.get_messages(
@@ -1087,8 +732,8 @@ async def handle_check(event):
         return
 
     logger.info(
-        "Получена команда /check: message_id=%s, "
-        "user_id=%s, topic_id=%s",
+        "Получена команда /check: "
+        "message_id=%s, user_id=%s, topic_id=%s",
         event.id,
         event.sender_id,
         get_topic_id(event),
@@ -1129,26 +774,25 @@ async def handle_check(event):
 
         if not await is_group_admin(user_id):
             logger.warning(
-                "Неавторизованная попытка /check. User ID: %s",
+                "Неавторизованная попытка /check. "
+                "User ID: %s",
                 user_id,
             )
             return
 
         logger.info(
-            "Права администратора для /check подтверждены. "
+            "Права администратора подтверждены. "
             "User ID: %s",
             user_id,
         )
 
         if publish_lock.locked():
             logger.warning(
-                "/check пропущена: началась другая публикация"
+                "/check пропущена: уже началась публикация"
             )
             return
 
-        await publish_lock.acquire()
-
-        try:
+        async with publish_lock:
             latest_post = await get_latest_source_post()
 
             if not latest_post:
@@ -1158,22 +802,25 @@ async def handle_check(event):
                 return
 
             logger.info(
-                "Последняя публикация источника получена для /check; "
+                "Последняя публикация получена для /check. "
                 "IDs=%s",
                 [message.id for message in latest_post],
             )
 
-            # Ручная команда намеренно обходит дедупликацию.
+            # /check намеренно обходит проверку дедупликации.
             await publish_news(latest_post)
+
+            # Помечаем публикацию, чтобы последующая
+            # автоматическая обработка не создала дубль.
+            mark_published(
+                make_news_key(latest_post)
+            )
 
             logger.info(
                 "Принудительная публикация /check завершена. "
                 "User ID: %s",
                 user_id,
             )
-
-        finally:
-            publish_lock.release()
 
     except Exception:
         logger.exception(
@@ -1185,7 +832,7 @@ async def handle_check(event):
 
 
 # ============================================================
-# 13. STARTUP AND SHUTDOWN
+# 11. STARTUP AND SHUTDOWN
 # ============================================================
 
 async def main():
@@ -1195,75 +842,81 @@ async def main():
         "Запуск Telethon Worker..."
     )
 
-    await client.start()
-
-    telethon_me = await client.get_me()
-
-    logger.info(
-        "Telethon подключён. Аккаунт ID: %s",
-        telethon_me.id,
-    )
-
-    bot_me = await bot.get_me()
-
-    logger.info(
-        "Bot API подключён: @%s, ID: %s",
-        bot_me.username,
-        bot_me.id,
-    )
-
-    source_entity = await client.get_entity(
-        SOURCE_CHANNEL
-    )
-
-    source_channel_id = (
-        getattr(
-            source_entity,
-            "channel_id",
-            None,
-        )
-        or source_entity.id
-    )
-
-    logger.info(
-        "Источник новостей: @%s, ID: %s",
-        SOURCE_CHANNEL,
-        source_channel_id,
-    )
-
-    await client.get_entity(
-        TARGET_CHAT_ID
-    )
-
-    logger.info(
-        "Целевая группа: %s",
-        TARGET_CHAT_ID,
-    )
-
-    logger.info(
-        "Тема новостей: %s",
-        NEWS_TOPIC_ID,
-    )
-
-    logger.info(
-        "Исключённая тема модерации: %s",
-        IGNORE_TOPIC_ID,
-    )
-
-    logger.info(
-        "Модерация @BrAssGay включена"
-    )
-
-    logger.info(
-        "Автоматические новости и /check включены"
-    )
-
-    logger.info(
-        "Публикация: Bot API с резервным "
-        "КОПИРОВАНИЕМ через Telethon"
-    )
-
     try:
+        await client.start()
+
+        telethon_me = await client.get_me()
+
+        logger.info(
+            "Telethon подключён. "
+            "Личный аккаунт ID: %s",
+            telethon_me.id,
+        )
+
+        bot_me = await bot.get_me()
+
+        logger.info(
+            "Bot API подключён для проверки администраторов: "
+            "@%s, ID: %s",
+            bot_me.username,
+            bot_me.id,
+        )
+
+        source_entity = await client.get_entity(
+            SOURCE_CHANNEL
+        )
+
+        source_channel_id = (
+            getattr(
+                source_entity,
+                "channel_id",
+                None,
+            )
+            or source_entity.id
+        )
+
+        logger.info(
+            "Источник новостей: @%s, ID: %s",
+            SOURCE_CHANNEL,
+            source_channel_id,
+        )
+
+        await client.get_entity(
+            TARGET_CHAT_ID
+        )
+
+        logger.info(
+            "Целевая группа: %s",
+            TARGET_CHAT_ID,
+        )
+
+        logger.info(
+            "Тема новостей: %s",
+            NEWS_TOPIC_ID,
+        )
+
+        logger.info(
+            "Исключённая тема модерации: %s",
+            IGNORE_TOPIC_ID,
+        )
+
+        logger.info(
+            "Модерация @BrAssGay включена"
+        )
+
+        logger.info(
+            "Автоматические новости и /check включены"
+        )
+
+        logger.info(
+            "Способ публикации: Telethon send_file "
+            "с прямым использованием исходного media"
+        )
+
+        logger.info(
+            "Локальное скачивание медиа для публикации отключено"
+        )
+
         await client.run_until_disconnected()
 
     finally:
