@@ -482,7 +482,12 @@ async def handle_source_album(event):
 def get_anonymous_sender_debug(event) -> dict:
     """
     Собирает диагностические поля сообщения.
-    Ничего не предполагает о правах отправителя.
+
+    Важно:
+    peer_id показывает адресата сообщения,
+    post_author является подписью.
+    Ни одно из этих полей само по себе
+    не подтверждает права администратора.
     """
 
     message = event.message
@@ -521,9 +526,10 @@ def get_anonymous_sender_debug(event) -> dict:
 
 def is_anonymous_group_admin(event) -> bool:
     """
-    Подтверждает отправку именно от имени целевой группы.
+    Не разрешает анонимную команду без подтверждения прав.
 
-    Важно: это не раскрывает личность администратора.
+    Для полноценной поддержки анонимных администраторов
+    потребуется проверка исходного сообщения в main.py.
     """
 
     debug = get_anonymous_sender_debug(event)
@@ -533,16 +539,21 @@ def is_anonymous_group_admin(event) -> bool:
         debug,
     )
 
-    message = event.message
-    from_id = getattr(message, "from_id", None)
+    from_id = getattr(event.message, "from_id", None)
 
     if from_id is not None:
         try:
-            if utils.get_peer_id(from_id) == TARGET_CHAT_ID:
-                return True
+            resolved_from_id = utils.get_peer_id(from_id)
+
+            if resolved_from_id == TARGET_CHAT_ID:
+                logger.warning(
+                    "Обнаружен from_id целевой группы. "
+                    "Это ещё не подтверждает права администратора."
+                )
+
         except Exception:
             logger.exception(
-                "Не удалось определить from_id анонимного сообщения"
+                "Не удалось определить from_id сообщения"
             )
 
     return False
@@ -622,25 +633,26 @@ async def handle_check(event):
     topic_id = get_topic_id(event)
 
     logger.info(
-        "Обнаружена команда /check: message_id=%s, sender_id=%s, topic_id=%s",
+        "Обнаружена команда /check: message_id=%s, "
+        "sender_id=%s, topic_id=%s",
         event.id,
         event.sender_id,
         topic_id,
     )
 
-    # Диагностика анонимного сообщения
     anonymous_admin = is_anonymous_group_admin(event)
 
     # Команда работает только в теме новостей.
     if topic_id != NEWS_TOPIC_ID:
         logger.warning(
-            "/check отклонена: неправильная тема. Получено: %s, ожидается: %s",
+            "/check отклонена: неправильная тема. "
+            "Получено: %s, ожидается: %s",
             topic_id,
             NEWS_TOPIC_ID,
         )
         return
 
-    # Если публикация уже выполняется, удаляем повторную команду.
+    # Не допускаем одновременные публикации.
     if check_in_progress or publish_lock.locked():
         with suppress(Exception):
             await event.delete()
@@ -653,66 +665,53 @@ async def handle_check(event):
     check_in_progress = True
 
     try:
-        # ----------------------------------------------------
-        # ПРОВЕРКА ПРАВ
-        # ----------------------------------------------------
+        user_id = event.sender_id
 
-        if anonymous_admin:
-            logger.info(
-                "Анонимное сообщение отправлено от имени целевой группы."
+        # Анонимный или неизвестный отправитель.
+        # Не разрешаем публикацию без подтверждения из main.py.
+        if anonymous_admin or not user_id:
+            logger.warning(
+                "/check от анонимного или неизвестного отправителя. "
+                "Публикация запрещена до подтверждения прав."
             )
 
-        else:
-            user_id = event.sender_id
-
-            if not user_id:
-                # ВАЖНО:
-                # Неизвестному отправителю не разрешаем публикацию,
-                # но команду удаляем, чтобы она не оставалась в чате.
-                logger.warning(
-                    "/check: отправитель не определён. "
-                    "Команда будет удалена, публикация запрещена."
+            try:
+                await event.delete()
+                logger.info(
+                    "Неподтверждённая команда /check удалена."
+                )
+            except Exception:
+                logger.exception(
+                    "Не удалось удалить неподтверждённую команду /check"
                 )
 
-                try:
-                    await event.delete()
-                    logger.info(
-                        "Команда /check от неизвестного отправителя удалена."
-                    )
-                except Exception:
-                    logger.exception(
-                        "Не удалось удалить /check от неизвестного отправителя"
-                    )
+            return
 
-                return
-
-            if not await is_group_admin(user_id):
-                logger.warning(
-                    "Отказ в /check: пользователь %s не является администратором",
-                    user_id,
-                )
-
-                try:
-                    await event.delete()
-                    logger.info(
-                        "Команда /check от неадминистратора удалена."
-                    )
-                except Exception:
-                    logger.exception(
-                        "Не удалось удалить команду неадминистратора"
-                    )
-
-                return
-
-            logger.info(
-                "Права администратора подтверждены. User ID: %s",
+        # Проверяем права обычного пользователя.
+        if not await is_group_admin(user_id):
+            logger.warning(
+                "Отказ в /check: пользователь %s не является администратором",
                 user_id,
             )
 
-        # ----------------------------------------------------
-        # УДАЛЕНИЕ КОМАНДЫ
-        # ----------------------------------------------------
+            try:
+                await event.delete()
+                logger.info(
+                    "Команда /check от неадминистратора удалена."
+                )
+            except Exception:
+                logger.exception(
+                    "Не удалось удалить команду неадминистратора"
+                )
 
+            return
+
+        logger.info(
+            "Права администратора подтверждены. User ID: %s",
+            user_id,
+        )
+
+        # Удаляем команду после проверки прав.
         try:
             await event.delete()
             logger.info(
@@ -720,12 +719,11 @@ async def handle_check(event):
                 event.id,
             )
         except Exception:
-            logger.exception("Не удалось удалить команду /check")
+            logger.exception(
+                "Не удалось удалить команду /check"
+            )
 
-        # ----------------------------------------------------
-        # ПРИНУДИТЕЛЬНАЯ ПУБЛИКАЦИЯ
-        # ----------------------------------------------------
-
+        # Получаем и публикуем последнюю новость.
         async with publish_lock:
             latest_post = await get_latest_source_post()
 
@@ -745,9 +743,7 @@ async def handle_check(event):
             mark_published(make_news_key(latest_post))
 
             logger.info(
-                "Принудительная публикация /check завершена. "
-                "Анонимный отправитель: %s",
-                anonymous_admin,
+                "Принудительная публикация /check завершена."
             )
 
     except Exception:
