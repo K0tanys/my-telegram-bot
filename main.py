@@ -2,7 +2,6 @@
 import asyncio
 import html
 import hmac
-import json
 import logging
 import os
 import re
@@ -45,18 +44,9 @@ PORT = int(os.getenv("PORT", "10000"))
 # 2. НАСТРОЙКИ МОДЕРАЦИИ
 # ==================================================
 
-# Тема «Чат для общения».
-# Основной бот ничего не делает в этой теме.
 ALLOWED_TOPIC_ID = 18600
-
-# Целевая группа GameFloid.
 TARGET_GROUP_ID = -1002165454770
-
-# Тема новостей.
-# Команду /check обрабатывает Telethon Worker.
 NEWS_TOPIC_ID = 25114
-
-# Через сколько секунд удалять предупреждение.
 WARNING_DELETE_DELAY = 12
 
 
@@ -162,6 +152,28 @@ def is_target_command(text):
     )[0].lower()
 
     return command in TARGET_COMMAND_SET
+
+
+def make_check_relay_signature(
+    chat_id: int,
+    topic_id: int,
+    original_message_id: int
+) -> str:
+    """
+    Создаёт подпись для подтверждённой анонимной команды /check.
+
+    Подпись проверяется Telethon Worker.
+    """
+
+    payload = (
+        f"{chat_id}:{topic_id}:{original_message_id}"
+    )
+
+    return hmac.new(
+        BOT_TOKEN.encode("utf-8"),
+        payload.encode("utf-8"),
+        "sha256"
+    ).hexdigest()
 
 
 # ==================================================
@@ -372,23 +384,17 @@ async def cleanup_warning(
 @dp.message()
 async def moderate_chat(message: Message):
 
-    # ------------------------------------------------
     # ШАГ 1. ПРОВЕРЯЕМ ГРУППУ
-    # ------------------------------------------------
 
     if not is_target_group(message):
         return
 
-    # ------------------------------------------------
     # ШАГ 2. ИСКЛЮЧАЕМ АДМИНСКИЙ ЧАТ
-    # ------------------------------------------------
 
     if message.chat.id == ADMIN_CHAT_ID:
         return
 
-    # ------------------------------------------------
     # ШАГ 3. ПОЛУЧАЕМ ID ТЕМЫ
-    # ------------------------------------------------
 
     current_topic = message.message_thread_id or 0
 
@@ -400,9 +406,7 @@ async def moderate_chat(message: Message):
         message.message_id
     )
 
-    # ------------------------------------------------
     # ШАГ 4. ПЕРЕДАЁМ /check TELETHON WORKER
-    # ------------------------------------------------
 
     if (
         current_topic == NEWS_TOPIC_ID
@@ -420,17 +424,59 @@ async def moderate_chat(message: Message):
 
         if command == "/check":
 
+            is_anonymous_group_sender = (
+                message.sender_chat is not None
+                and message.sender_chat.id == message.chat.id
+            )
+
+            if is_anonymous_group_sender:
+
+                signature = make_check_relay_signature(
+                    chat_id=message.chat.id,
+                    topic_id=current_topic,
+                    original_message_id=message.message_id
+                )
+
+                relay_text = (
+                    f"/check_relay "
+                    f"{message.message_id} "
+                    f"{signature}"
+                )
+
+                try:
+
+                    await bot.send_message(
+                        chat_id=TARGET_GROUP_ID,
+                        message_thread_id=NEWS_TOPIC_ID,
+                        text=relay_text,
+                        disable_notification=True
+                    )
+
+                    logger.info(
+                        "Анонимная /check подтверждена по sender_chat. "
+                        "Подписанная команда передана Worker. "
+                        "Original message ID: %s",
+                        message.message_id
+                    )
+
+                except TelegramAPIError:
+
+                    logger.exception(
+                        "Не удалось передать подтверждённую "
+                        "анонимную /check в Telethon Worker"
+                    )
+
+                return
+
             logger.info(
-                "Команда /check передана Telethon Worker. "
+                "Обычная команда /check передана Telethon Worker. "
                 "Message ID: %s",
                 message.message_id
             )
 
             return
 
-    # ------------------------------------------------
     # ШАГ 5. ПОЛНОСТЬЮ ИСКЛЮЧАЕМ ТЕМУ 18600
-    # ------------------------------------------------
 
     if is_ignored_topic(message):
 
@@ -443,29 +489,20 @@ async def moderate_chat(message: Message):
 
         return
 
-    # ------------------------------------------------
     # ШАГ 6. ОПРЕДЕЛЯЕМ АНОНИМНОГО ОТПРАВИТЕЛЯ
-    # ------------------------------------------------
 
     is_anonymous_group_sender = (
         message.sender_chat is not None
         and message.sender_chat.id == message.chat.id
     )
 
-    # ------------------------------------------------
     # ШАГ 7. НЕ ТРОГАЕМ САМОГО СЕБЯ И ДРУГИХ БОТОВ
-    # ------------------------------------------------
 
     if (
         message.from_user
         and message.from_user.id == BOT_ID
     ):
         return
-
-    # GroupAnonymousBot может представлять
-    # анонимного администратора группы.
-    # Его сообщение не пропускаем, если sender_chat
-    # совпадает с целевой группой.
 
     if (
         message.from_user
@@ -474,23 +511,17 @@ async def moderate_chat(message: Message):
     ):
         return
 
-    # ------------------------------------------------
     # ШАГ 8. ПРОВЕРЯЕМ ТЕКСТ
-    # ------------------------------------------------
 
     if not message.text:
         return
 
-    # ------------------------------------------------
     # ШАГ 9. ПРОВЕРЯЕМ ЗАПРЕЩЁННЫЕ КОМАНДЫ
-    # ------------------------------------------------
 
     if not is_target_command(message.text):
         return
 
-    # ------------------------------------------------
     # ШАГ 10. СОБИРАЕМ ДАННЫЕ ОТПРАВИТЕЛЯ
-    # ------------------------------------------------
 
     if is_anonymous_group_sender:
 
@@ -504,8 +535,7 @@ async def moderate_chat(message: Message):
         username = None
 
         logger.info(
-            "Обнаружено анонимное сообщение "
-            "от имени группы: %s",
+            "Обнаружено анонимное сообщение от имени группы: %s",
             first_name
         )
 
@@ -524,20 +554,16 @@ async def moderate_chat(message: Message):
         username = message.from_user.username
 
     chat_id = message.chat.id
-
     command_text = message.text
 
     logger.info(
-        "Запрещённая команда: %s, пользователь: %s, "
-        "тема: %s",
+        "Запрещённая команда: %s, пользователь: %s, тема: %s",
         command_text,
         user_id if user_id else "анонимно",
         current_topic
     )
 
-    # ------------------------------------------------
     # ШАГ 11. ТЕКСТ ПРЕДУПРЕЖДЕНИЯ
-    # ------------------------------------------------
 
     if user_id:
 
@@ -561,9 +587,7 @@ async def moderate_chat(message: Message):
 
     warning_id = None
 
-    # ------------------------------------------------
     # ШАГ 12. ОТПРАВЛЯЕМ ПРЕДУПРЕЖДЕНИЕ
-    # ------------------------------------------------
 
     try:
 
@@ -582,9 +606,7 @@ async def moderate_chat(message: Message):
             "Не удалось отправить предупреждение"
         )
 
-    # ------------------------------------------------
     # ШАГ 13. УДАЛЯЕМ КОМАНДУ
-    # ------------------------------------------------
 
     command_deleted = False
 
@@ -605,9 +627,7 @@ async def moderate_chat(message: Message):
             "Не удалось удалить команду"
         )
 
-    # ------------------------------------------------
     # ШАГ 14. ОТПРАВЛЯЕМ ОТЧЁТ АДМИНИСТРАЦИИ
-    # ------------------------------------------------
 
     await send_admin_report(
         topic_id=current_topic,
@@ -618,9 +638,7 @@ async def moderate_chat(message: Message):
         command_deleted=command_deleted
     )
 
-    # ------------------------------------------------
     # ШАГ 15. УДАЛЯЕМ ПРЕДУПРЕЖДЕНИЕ ЧЕРЕЗ 12 СЕКУНД
-    # ------------------------------------------------
 
     if warning_id is not None:
 
@@ -877,11 +895,8 @@ async def main_async():
         )
 
         logger.info(
-            "Анонимные сообщения от имени группы проверяются"
-        )
-
-        logger.info(
-            "Команда /check в теме новостей передаётся Telethon"
+            "Анонимные /check подтверждаются через sender_chat "
+            "и подписанный relay"
         )
 
         logger.info(
