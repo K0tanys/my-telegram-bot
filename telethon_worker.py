@@ -1,11 +1,12 @@
 
 import asyncio
+import hmac
 import logging
 import os
 import sqlite3
 from contextlib import suppress
 
-from telethon import TelegramClient, events, utils
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 from aiogram import Bot
@@ -34,7 +35,12 @@ SOURCE_CHANNEL = os.getenv(
 ).strip().lstrip("@")
 
 TARGET_CHAT_ID = -1002165454770
+
+# Бот, чьи сообщения модерируются.
 TARGET_BOT_ID = 8878352778
+
+# Основной бот GameFloid, который отправляет подписанный relay.
+CHECK_RELAY_BOT_ID = 8733564048
 
 NEWS_TOPIC_ID = 25114
 IGNORE_TOPIC_ID = 18600
@@ -476,87 +482,69 @@ async def handle_source_album(event):
 
 
 # ============================================================
-# 10. /CHECK — ADMIN AND ANONYMOUS ADMIN SUPPORT
+# 10. /CHECK HELPERS
 # ============================================================
 
 def get_anonymous_sender_debug(event) -> dict:
-    """
-    Собирает диагностические поля сообщения.
-
-    Важно:
-    peer_id показывает адресата сообщения,
-    post_author является подписью.
-    Ни одно из этих полей само по себе
-    не подтверждает права администратора.
-    """
-
     message = event.message
-    from_id = getattr(message, "from_id", None)
-    peer_id = getattr(message, "peer_id", None)
-
-    resolved_from_id = None
-    resolved_peer_id = None
-
-    try:
-        if from_id is not None:
-            resolved_from_id = utils.get_peer_id(from_id)
-    except Exception as error:
-        resolved_from_id = f"ERROR: {error}"
-
-    try:
-        if peer_id is not None:
-            resolved_peer_id = utils.get_peer_id(peer_id)
-    except Exception as error:
-        resolved_peer_id = f"ERROR: {error}"
 
     return {
         "event_chat_id": event.chat_id,
         "sender_id": event.sender_id,
-        "from_id": repr(from_id),
-        "from_id_resolved": resolved_from_id,
-        "peer_id": repr(peer_id),
-        "peer_id_resolved": resolved_peer_id,
+        "from_id": repr(getattr(message, "from_id", None)),
+        "peer_id": repr(getattr(message, "peer_id", None)),
         "post": getattr(message, "post", None),
         "post_author": getattr(message, "post_author", None),
         "via_bot_id": getattr(message, "via_bot_id", None),
-        "fwd_from": repr(getattr(message, "fwd_from", None)),
-        "reply_to": repr(getattr(message, "reply_to", None)),
     }
 
 
-def is_anonymous_group_admin(event) -> bool:
+def is_valid_check_relay(event, parts) -> bool:
     """
-    Не разрешает анонимную команду без подтверждения прав.
-
-    Для полноценной поддержки анонимных администраторов
-    потребуется проверка исходного сообщения в main.py.
+    Проверяет, что relay отправлен именно основным ботом
+    и что HMAC-подпись совпадает с исходным message_id.
     """
 
-    debug = get_anonymous_sender_debug(event)
+    if event.sender_id != CHECK_RELAY_BOT_ID:
+        logger.warning(
+            "Отклонён /check_relay: неверный отправитель. sender_id=%s",
+            event.sender_id,
+        )
+        return False
 
-    logger.warning(
-        "ANONYMOUS DEBUG: %s",
-        debug,
+    if len(parts) != 3:
+        logger.warning("Отклонён /check_relay: неверный формат")
+        return False
+
+    original_message_id = parts[1]
+    received_signature = parts[2]
+
+    if not original_message_id.isdigit():
+        logger.warning(
+            "Отклонён /check_relay: некорректный исходный message_id"
+        )
+        return False
+
+    payload = (
+        f"{TARGET_CHAT_ID}:{NEWS_TOPIC_ID}:{original_message_id}"
     )
 
-    from_id = getattr(event.message, "from_id", None)
+    expected_signature = hmac.new(
+        BOT_TOKEN.encode("utf-8"),
+        payload.encode("utf-8"),
+        "sha256",
+    ).hexdigest()
 
-    if from_id is not None:
-        try:
-            resolved_from_id = utils.get_peer_id(from_id)
+    if not hmac.compare_digest(
+        received_signature,
+        expected_signature,
+    ):
+        logger.warning(
+            "Отклонён /check_relay: неверная HMAC-подпись"
+        )
+        return False
 
-            if resolved_from_id == TARGET_CHAT_ID:
-                logger.warning(
-                    "Обнаружен from_id целевой группы. "
-                    "Это ещё не подтверждает права администратора."
-                )
-
-        except Exception:
-            logger.exception(
-                "Не удалось определить from_id сообщения"
-            )
-
-    return False
+    return True
 
 
 async def is_group_admin(user_id: int) -> bool:
@@ -615,126 +603,37 @@ async def get_latest_source_post():
     return [latest]
 
 
-@client.on(events.NewMessage(chats=TARGET_CHAT_ID))
-async def handle_check(event):
+async def publish_latest_source_post(source: str):
+    """
+    Общая функция публикации последней новости
+    для обычного администратора и подтверждённого relay.
+    """
+
     global check_in_progress
 
-    text = event.raw_text or ""
-
-    if not text.strip():
-        return
-
-    first_token = text.strip().split(maxsplit=1)[0]
-    command = first_token.split("@", 1)[0].lower()
-
-    if command != "/check":
-        return
-
-    topic_id = get_topic_id(event)
-
-    logger.info(
-        "Обнаружена команда /check: message_id=%s, "
-        "sender_id=%s, topic_id=%s",
-        event.id,
-        event.sender_id,
-        topic_id,
-    )
-
-    anonymous_admin = is_anonymous_group_admin(event)
-
-    # Команда работает только в теме новостей.
-    if topic_id != NEWS_TOPIC_ID:
-        logger.warning(
-            "/check отклонена: неправильная тема. "
-            "Получено: %s, ожидается: %s",
-            topic_id,
-            NEWS_TOPIC_ID,
-        )
-        return
-
-    # Не допускаем одновременные публикации.
     if check_in_progress or publish_lock.locked():
-        with suppress(Exception):
-            await event.delete()
-
         logger.warning(
-            "Повторная /check пропущена: публикация уже выполняется"
+            "Запрос %s пропущен: публикация уже выполняется",
+            source,
         )
-        return
+        return False
 
     check_in_progress = True
 
     try:
-        user_id = event.sender_id
-
-        # Анонимный или неизвестный отправитель.
-        # Не разрешаем публикацию без подтверждения из main.py.
-        if anonymous_admin or not user_id:
-            logger.warning(
-                "/check от анонимного или неизвестного отправителя. "
-                "Публикация запрещена до подтверждения прав."
-            )
-
-            try:
-                await event.delete()
-                logger.info(
-                    "Неподтверждённая команда /check удалена."
-                )
-            except Exception:
-                logger.exception(
-                    "Не удалось удалить неподтверждённую команду /check"
-                )
-
-            return
-
-        # Проверяем права обычного пользователя.
-        if not await is_group_admin(user_id):
-            logger.warning(
-                "Отказ в /check: пользователь %s не является администратором",
-                user_id,
-            )
-
-            try:
-                await event.delete()
-                logger.info(
-                    "Команда /check от неадминистратора удалена."
-                )
-            except Exception:
-                logger.exception(
-                    "Не удалось удалить команду неадминистратора"
-                )
-
-            return
-
-        logger.info(
-            "Права администратора подтверждены. User ID: %s",
-            user_id,
-        )
-
-        # Удаляем команду после проверки прав.
-        try:
-            await event.delete()
-            logger.info(
-                "Команда /check удалена. message_id=%s",
-                event.id,
-            )
-        except Exception:
-            logger.exception(
-                "Не удалось удалить команду /check"
-            )
-
-        # Получаем и публикуем последнюю новость.
         async with publish_lock:
             latest_post = await get_latest_source_post()
 
             if not latest_post:
                 logger.warning(
-                    "В источнике нет публикаций для /check"
+                    "В источнике нет публикаций для %s",
+                    source,
                 )
-                return
+                return False
 
             logger.info(
-                "Последняя публикация получена для /check. IDs=%s",
+                "Последняя публикация получена для %s. IDs=%s",
+                source,
                 [message.id for message in latest_post],
             )
 
@@ -743,18 +642,195 @@ async def handle_check(event):
             mark_published(make_news_key(latest_post))
 
             logger.info(
-                "Принудительная публикация /check завершена."
+                "Публикация последней новости завершена. Источник запроса: %s",
+                source,
             )
 
+            return True
+
     except Exception:
-        logger.exception("Ошибка обработки /check")
+        logger.exception(
+            "Ошибка принудительной публикации. Источник: %s",
+            source,
+        )
+        return False
 
     finally:
         check_in_progress = False
 
 
 # ============================================================
-# 11. STARTUP AND SHUTDOWN
+# 11. /CHECK AND SIGNED /CHECK_RELAY HANDLER
+# ============================================================
+
+@client.on(events.NewMessage(chats=TARGET_CHAT_ID))
+async def handle_check(event):
+    text = event.raw_text or ""
+
+    if not text.strip():
+        return
+
+    parts = text.strip().split()
+
+    first_token = parts[0]
+    command = first_token.split("@", 1)[0].lower()
+
+    topic_id = get_topic_id(event)
+
+    # --------------------------------------------------------
+    # A. SIGNED RELAY FROM GAMEFLOID BOT
+    # --------------------------------------------------------
+
+    if command == "/check_relay":
+
+        logger.info(
+            "Получен /check_relay: message_id=%s, sender_id=%s, topic_id=%s",
+            event.id,
+            event.sender_id,
+            topic_id,
+        )
+
+        # Relay разрешён только в теме новостей.
+        if topic_id != NEWS_TOPIC_ID:
+            logger.warning(
+                "/check_relay отклонён: неправильная тема %s",
+                topic_id,
+            )
+            return
+
+        # Чужие сообщения не удаляем и не обрабатываем.
+        if event.sender_id != CHECK_RELAY_BOT_ID:
+            logger.warning(
+                "Сообщение /check_relay от неизвестного отправителя оставлено без обработки"
+            )
+            return
+
+        # Техническое сообщение удаляем, чтобы участники
+        # не видели внутреннюю команду.
+        try:
+            await event.delete()
+            logger.info(
+                "Технический /check_relay удалён. message_id=%s",
+                event.id,
+            )
+        except Exception:
+            logger.exception(
+                "Не удалось удалить технический /check_relay"
+            )
+
+        # Проверяем подпись.
+        if not is_valid_check_relay(event, parts):
+            logger.warning(
+                "Relay не прошёл проверку. Публикация запрещена."
+            )
+            return
+
+        logger.info(
+            "HMAC-подпись /check_relay подтверждена. "
+            "Исходный message_id=%s",
+            parts[1],
+        )
+
+        # Запускаем публикацию последней новости.
+        success = await publish_latest_source_post(
+            source="подтверждённый анонимный администратор"
+        )
+
+        if success:
+            logger.info(
+                "Анонимная /check успешно выполнена через подписанный relay."
+            )
+        else:
+            logger.warning(
+                "Подписанный relay принят, но публикация не выполнена."
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # B. NORMAL /CHECK COMMAND
+    # --------------------------------------------------------
+
+    if command != "/check":
+        return
+
+    logger.info(
+        "Обнаружена команда /check: message_id=%s, sender_id=%s, topic_id=%s",
+        event.id,
+        event.sender_id,
+        topic_id,
+    )
+
+    if topic_id != NEWS_TOPIC_ID:
+        logger.warning(
+            "/check отклонена: неправильная тема. Получено: %s",
+            topic_id,
+        )
+        return
+
+    # Если команда пришла от анонимного администратора,
+    # её права подтверждает main.py через sender_chat.
+    if not event.sender_id:
+        logger.info(
+            "Исходная анонимная /check ожидает подтверждения main.py. "
+            "Самостоятельная публикация запрещена."
+        )
+
+        try:
+            await event.delete()
+            logger.info(
+                "Исходная анонимная /check удалена. message_id=%s",
+                event.id,
+            )
+        except Exception:
+            logger.exception(
+                "Не удалось удалить исходную анонимную /check"
+            )
+
+        return
+
+    # Проверка прав обычного пользователя.
+    if not await is_group_admin(event.sender_id):
+        logger.warning(
+            "Отказ в /check: пользователь %s не является администратором",
+            event.sender_id,
+        )
+
+        try:
+            await event.delete()
+            logger.info(
+                "Команда /check от неадминистратора удалена."
+            )
+        except Exception:
+            logger.exception(
+                "Не удалось удалить команду неадминистратора"
+            )
+
+        return
+
+    logger.info(
+        "Права администратора подтверждены. User ID: %s",
+        event.sender_id,
+    )
+
+    try:
+        await event.delete()
+        logger.info(
+            "Команда /check удалена. message_id=%s",
+            event.id,
+        )
+    except Exception:
+        logger.exception(
+            "Не удалось удалить команду /check"
+        )
+
+    await publish_latest_source_post(
+        source=f"обычный администратор {event.sender_id}"
+    )
+
+
+# ============================================================
+# 12. STARTUP AND SHUTDOWN
 # ============================================================
 
 async def main():
@@ -780,6 +856,12 @@ async def main():
             bot_me.id,
         )
 
+        if bot_me.id != CHECK_RELAY_BOT_ID:
+            raise RuntimeError(
+                "Неверный BOT_TOKEN: ожидался @GameFloidBot "
+                f"с ID {CHECK_RELAY_BOT_ID}, получен ID {bot_me.id}"
+            )
+
         source_entity = await client.get_entity(SOURCE_CHANNEL)
 
         source_channel_id = (
@@ -801,12 +883,15 @@ async def main():
         logger.info("Модерация @BrAssGay включена")
         logger.info("Автоматические новости и /check включены")
         logger.info(
+            "Подписанный /check_relay включён. "
+            "Relay Bot ID: %s",
+            CHECK_RELAY_BOT_ID,
+        )
+        logger.info(
             "Способ публикации: Telethon send_file "
             "с прямым использованием исходного media"
         )
-        logger.info(
-            "Локальное скачивание медиа отключено"
-        )
+        logger.info("Локальное скачивание медиа отключено")
 
         await client.run_until_disconnected()
 
