@@ -1,4 +1,3 @@
-
 import asyncio
 import asyncpg
 import html
@@ -715,12 +714,11 @@ async def moderate_announcement(message, current_topic):
         )
         return True
 
-    topic_name = COOLDOWN_TOPIC_NAMES[current_topic]
     remaining_text = format_remaining(remaining)
 
+    # Одинаковое предупреждение во всех девяти темах — без названия темы.
     warning_text = (
-        f"⚠️ Вы уже публиковали объявление в теме "
-        f"<b>«{escape(topic_name)}»</b>!\n\n"
+        f"⚠️ Вы уже опубликовали объявление в этой теме.\n\n"
         f"Следующая публикация будет доступна через "
         f"<b>{remaining_text}</b>.\n\n"
         f"Пожалуйста, дождитесь окончания ограничения."
