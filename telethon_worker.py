@@ -3,11 +3,13 @@ import asyncio
 import hmac
 import logging
 import os
-import sqlite3
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from contextlib import suppress
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+
+import asyncpg
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
@@ -45,10 +47,7 @@ CHECK_RELAY_BOT_ID = 8733564048
 NEWS_TOPIC_ID = 25114
 IGNORE_TOPIC_ID = 18600
 
-DATABASE_PATH = os.getenv(
-    "NEWS_DATABASE",
-    "news_state.sqlite3",
-)
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 if not API_HASH or not TELETHON_SESSION:
     raise RuntimeError("Не заданы API_HASH или TELETHON_SESSION")
@@ -80,51 +79,95 @@ source_channel_id = None
 
 
 # ============================================================
-# 3. PERSISTENT DEDUPLICATION
+# 3. PERSISTENT DEDUPLICATION — NEON POSTGRESQL
 # ============================================================
 
-_db = sqlite3.connect(
-    DATABASE_PATH,
-    check_same_thread=False,
-)
+_db_pool = None
 
-_db.execute("PRAGMA journal_mode=WAL")
-_db.execute("PRAGMA synchronous=NORMAL")
 
-_db.execute(
+async def initialize_database():
     """
-    CREATE TABLE IF NOT EXISTS published_news (
-        news_key TEXT PRIMARY KEY,
-        published_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
+    Подключается к Neon PostgreSQL и создаёт таблицу,
+    если её ещё нет. Новая база начинает работу пустой.
     """
-)
+    global _db_pool
 
-_db.commit()
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "Не задан DATABASE_URL. Добавьте строку подключения Neon "
+            "в Render → Environment."
+        )
 
+    # asyncpg использует SSL через параметр ssl, поэтому убираем
+    # libpq-параметры sslmode/channel_binding из URL, если они есть.
+    parsed_url = urlsplit(DATABASE_URL)
+    safe_query = [
+        (key, value)
+        for key, value in parse_qsl(parsed_url.query, keep_blank_values=True)
+        if key.lower() not in ("sslmode", "channel_binding")
+    ]
+    asyncpg_dsn = urlunsplit((
+        parsed_url.scheme,
+        parsed_url.netloc,
+        parsed_url.path,
+        urlencode(safe_query),
+        parsed_url.fragment,
+    ))
 
-def was_published(news_key: str) -> bool:
-    row = _db.execute(
-        """
-        SELECT 1 FROM published_news
-        WHERE news_key = ?
-        LIMIT 1
-        """,
-        (news_key,),
-    ).fetchone()
-
-    return row is not None
-
-
-def mark_published(news_key: str) -> None:
-    _db.execute(
-        """
-        INSERT OR IGNORE INTO published_news (news_key)
-        VALUES (?)
-        """,
-        (news_key,),
+    _db_pool = await asyncpg.create_pool(
+        dsn=asyncpg_dsn,
+        min_size=1,
+        max_size=5,
+        ssl="require",
+        command_timeout=30,
     )
-    _db.commit()
+
+    async with _db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS published_news (
+                news_key TEXT PRIMARY KEY,
+                published_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+
+    logger.info("Подключение к Neon PostgreSQL успешно.")
+    logger.info("Таблица published_news проверена/создана.")
+
+
+async def was_published(news_key: str) -> bool:
+    if _db_pool is None:
+        raise RuntimeError("База данных ещё не инициализирована.")
+
+    async with _db_pool.acquire() as connection:
+        result = await connection.fetchval(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM published_news
+                WHERE news_key = $1
+            )
+            """,
+            news_key,
+        )
+
+    return bool(result)
+
+
+async def mark_published(news_key: str) -> None:
+    if _db_pool is None:
+        raise RuntimeError("База данных ещё не инициализирована.")
+
+    async with _db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO published_news (news_key)
+            VALUES ($1)
+            ON CONFLICT (news_key) DO NOTHING
+            """,
+            news_key,
+        )
 
 
 # ============================================================
@@ -443,14 +486,14 @@ async def process_automatic_news(messages):
 
     try:
         async with publish_lock:
-            if was_published(key):
+            if await was_published(key):
                 logger.info("Автоматический дубль пропущен: %s", key)
                 return
 
             logger.info("Начинаю автоматическую публикацию: %s", key)
 
             await publish_news(ordered)
-            mark_published(key)
+            await mark_published(key)
 
             logger.info("Автоматическая публикация завершена: %s", key)
 
@@ -639,7 +682,7 @@ async def publish_latest_source_post(source: str):
 
             await publish_news(latest_post)
 
-            mark_published(make_news_key(latest_post))
+            await mark_published(make_news_key(latest_post))
 
             logger.info(
                 "Публикация последней новости завершена. Источник запроса: %s",
@@ -839,6 +882,7 @@ async def main():
     logger.info("Запуск Telethon Worker...")
 
     try:
+        await initialize_database()
         await client.start()
 
         telethon_me = await client.get_me()
@@ -899,7 +943,10 @@ async def main():
         logger.info("Остановка Telethon Worker...")
 
         await bot.session.close()
-        _db.close()
+
+        if _db_pool is not None:
+            await _db_pool.close()
+            logger.info("Соединение с Neon PostgreSQL закрыто.")
 
         if client.is_connected():
             await client.disconnect()
