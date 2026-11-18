@@ -1,5 +1,6 @@
 
 import asyncio
+import asyncpg
 import html
 import hmac
 import logging
@@ -7,11 +8,13 @@ import os
 import re
 from collections import deque
 from contextlib import suppress
+from datetime import datetime, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode, ChatType
+from aiogram.enums import ParseMode, ChatType, ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message, Update
 
@@ -37,6 +40,8 @@ RENDER_EXTERNAL_URL = os.getenv(
 ).rstrip("/")
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+TEST_MODE = os.getenv("TEST_MODE", "true").strip().lower() in ("1", "true", "yes", "on")
 PORT = int(os.getenv("PORT", "10000"))
 
 
@@ -48,6 +53,23 @@ ALLOWED_TOPIC_ID = 18600
 TARGET_GROUP_ID = -1002165454770
 NEWS_TOPIC_ID = 25114
 WARNING_DELETE_DELAY = 12
+
+# Ровно девять тем, в которых публикуются объявления.
+COOLDOWN_SECONDS = 5 * 60 * 60
+COOLDOWN_TOPIC_NAMES = {
+    21617: "Дома/гаражи",
+    21619: "Авто",
+    21621: "Скины",
+    21622: "Аксы",
+    21655: "Бизнес",
+    21656: "Номерные знаки",
+    21657: "SIM-card",
+    21658: "Прочие услуги",
+    22032: "Реклама семьи",
+}
+COOLDOWN_TOPIC_IDS = set(COOLDOWN_TOPIC_NAMES)
+
+db_pool = None
 
 
 # ==================================================
@@ -244,6 +266,470 @@ def get_topic_link(topic_id):
     )
 
     return f"{base_url}/{topic_id}"
+
+
+
+# ==================================================
+# 10. NEON POSTGRESQL И ТАЙМЕРЫ ОБЪЯВЛЕНИЙ
+# ==================================================
+
+async def init_database():
+    global db_pool
+
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "Не задан DATABASE_URL. Добавьте Neon connection string "
+            "в Render → Environment."
+        )
+
+    parsed_url = urlsplit(DATABASE_URL)
+    safe_query = [
+        (key, value)
+        for key, value in parse_qsl(
+            parsed_url.query,
+            keep_blank_values=True
+        )
+        if key.lower() not in ("sslmode", "channel_binding")
+    ]
+    asyncpg_dsn = urlunsplit((
+        parsed_url.scheme,
+        parsed_url.netloc,
+        parsed_url.path,
+        urlencode(safe_query),
+        parsed_url.fragment,
+    ))
+
+    db_pool = await asyncpg.create_pool(
+        dsn=asyncpg_dsn,
+        min_size=1,
+        max_size=5,
+        ssl="require",
+        command_timeout=30,
+    )
+
+    async with db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS announcement_timers (
+                user_id BIGINT NOT NULL,
+                topic_id BIGINT NOT NULL,
+                published_at TIMESTAMPTZ NOT NULL,
+                last_message_id BIGINT NOT NULL,
+                last_media_group_id TEXT,
+                PRIMARY KEY (user_id, topic_id)
+            )
+            """
+        )
+        await connection.execute(
+            """
+            ALTER TABLE announcement_timers
+            ADD COLUMN IF NOT EXISTS last_media_group_id TEXT
+            """
+        )
+
+    logger.info("Подключение main.py к Neon PostgreSQL успешно.")
+    logger.info("Таблица announcement_timers проверена/создана.")
+
+
+def format_remaining(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+async def register_announcement(user_id, topic_id, message_id, media_group_id=None):
+    """
+    Атомарно регистрирует публикацию.
+    Возвращает (True, 0) при разрешённой публикации,
+    (False, remaining_seconds) при активном таймере.
+    Повторная доставка того же Telegram message_id не продлевает таймер.
+    """
+    if db_pool is None:
+        raise RuntimeError("Neon PostgreSQL ещё не инициализирован.")
+
+    lock_key = f"announcement:{user_id}:{topic_id}"
+
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                lock_key
+            )
+
+            current = await connection.fetchrow(
+                """
+                SELECT
+                    last_message_id,
+                    last_media_group_id,
+                    GREATEST(
+                        0,
+                        CEIL(EXTRACT(
+                            EPOCH FROM (
+                                published_at
+                                + INTERVAL '5 hours'
+                                - NOW()
+                            )
+                        ))
+                    )::BIGINT AS remaining
+                FROM announcement_timers
+                WHERE user_id = $1 AND topic_id = $2
+                """,
+                user_id,
+                topic_id
+            )
+
+            if current:
+                # Защита от повторной доставки того же сообщения после рестарта.
+                if current["last_message_id"] == message_id:
+                    return True, 0
+
+                if (
+                    media_group_id
+                    and current["last_media_group_id"] == media_group_id
+                ):
+                    return True, 0
+
+                remaining = int(current["remaining"] or 0)
+                if remaining > 0:
+                    return False, remaining
+
+            await connection.execute(
+                """
+                INSERT INTO announcement_timers (
+                    user_id,
+                    topic_id,
+                    published_at,
+                    last_message_id,
+                    last_media_group_id
+                )
+                VALUES ($1, $2, NOW(), $3, $4)
+                ON CONFLICT (user_id, topic_id)
+                DO UPDATE SET
+                    published_at = EXCLUDED.published_at,
+                    last_message_id = EXCLUDED.last_message_id,
+                    last_media_group_id = EXCLUDED.last_media_group_id
+                """,
+                user_id,
+                topic_id,
+                message_id,
+                media_group_id
+            )
+
+            return True, 0
+
+
+async def get_announcement_remaining(user_id, topic_id):
+    if db_pool is None:
+        raise RuntimeError("Neon PostgreSQL ещё не инициализирован.")
+
+    async with db_pool.acquire() as connection:
+        remaining = await connection.fetchval(
+            """
+            SELECT GREATEST(
+                0,
+                CEIL(EXTRACT(
+                    EPOCH FROM (
+                        published_at
+                        + INTERVAL '5 hours'
+                        - NOW()
+                    )
+                ))
+            )::BIGINT
+            FROM announcement_timers
+            WHERE user_id = $1 AND topic_id = $2
+            """,
+            user_id,
+            topic_id
+        )
+
+    return int(remaining or 0)
+
+
+async def is_group_admin(user_id):
+    try:
+        member = await bot.get_chat_member(
+            chat_id=TARGET_GROUP_ID,
+            user_id=user_id
+        )
+        return member.status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR
+        )
+    except TelegramAPIError:
+        logger.exception(
+            "Не удалось проверить права пользователя %s",
+            user_id
+        )
+        return False
+
+
+async def send_temporary_topic_message(message, text):
+    try:
+        sent = await bot.send_message(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text=text,
+            disable_web_page_preview=True
+        )
+        create_background_task(
+            cleanup_warning(message.chat.id, sent.message_id)
+        )
+    except TelegramAPIError:
+        logger.exception("Не удалось отправить ответ команды таймера")
+
+
+async def handle_timer_command(message, current_topic):
+    """
+    Обрабатывает /my_timer и /reset_timer только в девяти рекламных темах.
+    Возвращает True, если сообщение было одной из этих команд.
+    """
+    if current_topic not in COOLDOWN_TOPIC_IDS or not message.text:
+        return False
+
+    parts = message.text.strip().split()
+    if not parts:
+        return False
+
+    command = parts[0].split("@", 1)[0].lower()
+
+    if command == "/my_timer":
+        if not message.from_user:
+            return True
+
+        remaining = await get_announcement_remaining(
+            message.from_user.id,
+            current_topic
+        )
+        topic_name = COOLDOWN_TOPIC_NAMES[current_topic]
+
+        if remaining > 0:
+            response = (
+                f"⏳ В теме «{escape(topic_name)}» до следующей публикации "
+                f"осталось <b>{format_remaining(remaining)}</b>."
+            )
+        else:
+            response = (
+                f"✅ В теме «{escape(topic_name)}» публикация разрешена."
+            )
+
+        await send_temporary_topic_message(message, response)
+        return True
+
+    if command != "/reset_timer":
+        return False
+
+    if not message.from_user or not await is_group_admin(message.from_user.id):
+        await send_temporary_topic_message(
+            message,
+            "⛔ Сбрасывать таймеры могут только администраторы и создатель группы."
+        )
+        return True
+
+    target_user_id = None
+
+    if len(parts) == 1:
+        if not message.reply_to_message:
+            await send_temporary_topic_message(
+                message,
+                "Использование: ответьте на сообщение пользователя командой /reset_timer "
+                "или укажите /reset_timer USER_ID."
+            )
+            return True
+
+        replied = message.reply_to_message
+        if not replied.from_user:
+            await send_temporary_topic_message(
+                message,
+                "Не удалось определить ID автора сообщения."
+            )
+            return True
+
+        target_user_id = replied.from_user.id
+
+    elif len(parts) == 2 and parts[1].lower() == "all":
+        async with db_pool.acquire() as connection:
+            result = await connection.execute(
+                "DELETE FROM announcement_timers WHERE topic_id = ANY($1::BIGINT[])",
+                list(COOLDOWN_TOPIC_IDS)
+            )
+        await send_temporary_topic_message(
+            message,
+            "✅ Таймеры всех пользователей во всех девяти темах сброшены."
+        )
+        logger.info(
+            "Администратор %s сбросил все таймеры. DB result: %s",
+            message.from_user.id,
+            result
+        )
+        return True
+
+    elif len(parts) == 2:
+        try:
+            target_user_id = int(parts[1])
+            if target_user_id <= 0:
+                raise ValueError
+        except ValueError:
+            await send_temporary_topic_message(
+                message,
+                "ID пользователя должен быть положительным числом."
+            )
+            return True
+    else:
+        await send_temporary_topic_message(
+            message,
+            "Использование: /reset_timer, /reset_timer USER_ID или /reset_timer all."
+        )
+        return True
+
+    async with db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            DELETE FROM announcement_timers
+            WHERE user_id = $1 AND topic_id = $2
+            """,
+            target_user_id,
+            current_topic
+        )
+
+    await send_temporary_topic_message(
+        message,
+        f"✅ Таймер пользователя <code>{target_user_id}</code> "
+        f"в этой теме сброшен."
+    )
+    logger.info(
+        "Администратор %s сбросил таймер пользователя %s в теме %s",
+        message.from_user.id,
+        target_user_id,
+        current_topic
+    )
+    return True
+
+
+def is_announcement_message(message):
+    """
+    Учитывает текст, подписи и пользовательские медиа.
+    Сервисные сообщения и пустые сообщения не считаются объявлениями.
+    """
+    if message.text or message.caption:
+        return True
+
+    media_fields = (
+        "photo",
+        "video",
+        "animation",
+        "document",
+        "audio",
+        "voice",
+        "video_note",
+        "sticker",
+        "contact",
+        "location",
+        "venue",
+        "poll",
+        "dice",
+        "paid_media",
+    )
+    return any(getattr(message, field, None) for field in media_fields)
+
+
+async def moderate_announcement(message, current_topic):
+    """
+    Проверка 5-часового ограничения в whitelist-темах.
+    """
+    if current_topic not in COOLDOWN_TOPIC_IDS:
+        return False
+
+    # Анонимные сообщения нельзя связать с конкретным user_id.
+    if not message.from_user:
+        logger.info(
+            "Объявление без user_id пропущено системой таймеров. "
+            "Message ID: %s",
+            message.message_id
+        )
+        return True
+
+    user_id = message.from_user.id
+
+    # TEST_MODE=True ограничивает и администраторов/создателя.
+    # При TEST_MODE=False администраторы и создатель освобождаются.
+    if not TEST_MODE and await is_group_admin(user_id):
+        return False
+
+    if not is_announcement_message(message):
+        return False
+
+    try:
+        allowed, remaining = await register_announcement(
+            user_id=user_id,
+            topic_id=current_topic,
+            message_id=message.message_id,
+            media_group_id=message.media_group_id
+        )
+    except Exception:
+        logger.exception(
+            "Ошибка проверки/записи таймера в Neon. "
+            "Сообщение %s пользователя %s оставлено в группе.",
+            message.message_id,
+            user_id
+        )
+        return True
+
+    if allowed:
+        logger.info(
+            "Объявление зарегистрировано: user_id=%s, topic_id=%s, "
+            "message_id=%s, cooldown=5h",
+            user_id,
+            current_topic,
+            message.message_id
+        )
+        return True
+
+    topic_name = COOLDOWN_TOPIC_NAMES[current_topic]
+    remaining_text = format_remaining(remaining)
+
+    warning_text = (
+        f"⚠️ Вы уже публиковали объявление в теме "
+        f"<b>«{escape(topic_name)}»</b>!\n\n"
+        f"Следующая публикация будет доступна через "
+        f"<b>{remaining_text}</b>.\n\n"
+        f"Пожалуйста, дождитесь окончания ограничения."
+    )
+
+    try:
+        await message.delete()
+        logger.info(
+            "Повторное объявление удалено: user_id=%s, topic_id=%s, "
+            "message_id=%s",
+            user_id,
+            current_topic,
+            message.message_id
+        )
+    except TelegramAPIError:
+        logger.exception(
+            "Не удалось удалить повторное объявление: "
+            "user_id=%s, topic_id=%s, message_id=%s",
+            user_id,
+            current_topic,
+            message.message_id
+        )
+
+    try:
+        warning = await bot.send_message(
+            chat_id=message.chat.id,
+            message_thread_id=current_topic,
+            text=warning_text,
+            disable_web_page_preview=True
+        )
+        create_background_task(
+            cleanup_warning(message.chat.id, warning.message_id)
+        )
+    except TelegramAPIError:
+        logger.exception(
+            "Не удалось отправить предупреждение о лимите"
+        )
+
+    return True
 
 
 # ==================================================
@@ -511,12 +997,25 @@ async def moderate_chat(message: Message):
     ):
         return
 
-    # ШАГ 8. ПРОВЕРЯЕМ ТЕКСТ
+    # ШАГ 8. КОМАНДЫ УПРАВЛЕНИЯ ТАЙМЕРАМИ И ЛИМИТ ОБЪЯВЛЕНИЙ
+    # Работают только в девяти whitelist-темах.
+    if current_topic in COOLDOWN_TOPIC_IDS:
+
+        if await handle_timer_command(message, current_topic):
+            return
+
+        # Запрещённые команды продолжают обрабатываться старой
+        # системой модерации, а не засчитываются как объявления.
+        if not (message.text and is_target_command(message.text)):
+            await moderate_announcement(message, current_topic)
+            return
+
+    # ШАГ 9. ПРОВЕРЯЕМ ТЕКСТ
 
     if not message.text:
         return
 
-    # ШАГ 9. ПРОВЕРЯЕМ ЗАПРЕЩЁННЫЕ КОМАНДЫ
+    # ШАГ 10. ПРОВЕРЯЕМ ЗАПРЕЩЁННЫЕ КОМАНДЫ
 
     if not is_target_command(message.text):
         return
@@ -856,6 +1355,8 @@ async def main_async():
 
     try:
 
+        await init_database()
+
         bot_info = await bot.get_me()
 
         BOT_ID = bot_info.id
@@ -879,6 +1380,16 @@ async def main_async():
         logger.info(
             "Тема новостей ID: %s",
             NEWS_TOPIC_ID
+        )
+
+        logger.info(
+            "Темы с лимитом объявлений 5 часов: %s",
+            COOLDOWN_TOPIC_NAMES
+        )
+
+        logger.info(
+            "TEST_MODE: %s",
+            TEST_MODE
         )
 
         logger.info(
@@ -948,6 +1459,10 @@ async def main_async():
                 await task
 
         await runner.cleanup()
+
+        if db_pool is not None:
+            await db_pool.close()
+            logger.info("Подключение main.py к Neon PostgreSQL закрыто.")
 
         await bot.session.close()
 
