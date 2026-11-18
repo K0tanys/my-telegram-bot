@@ -479,9 +479,22 @@ async def send_temporary_topic_message(message, text):
         logger.exception("Не удалось отправить ответ команды таймера")
 
 
+async def delete_timer_command(message):
+    """Удаляет команду управления таймером после её распознавания."""
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        logger.exception(
+            "Не удалось удалить команду управления таймером. "
+            "Message ID: %s",
+            message.message_id
+        )
+
+
 async def handle_timer_command(message, current_topic):
     """
     Обрабатывает /my_timer и /reset_timer только в девяти рекламных темах.
+    Команда удаляется, а ответное уведомление автоматически удаляется через 12 секунд.
     Возвращает True, если сообщение было одной из этих команд.
     """
     if current_topic not in COOLDOWN_TOPIC_IDS or not message.text:
@@ -494,6 +507,8 @@ async def handle_timer_command(message, current_topic):
     command = parts[0].split("@", 1)[0].lower()
 
     if command == "/my_timer":
+        await delete_timer_command(message)
+
         if not message.from_user:
             return True
 
@@ -519,6 +534,10 @@ async def handle_timer_command(message, current_topic):
     if command != "/reset_timer":
         return False
 
+    # Удаляем команду администратора при любом результате её обработки:
+    # успешный сброс, недостаток прав, неверный аргумент или отсутствие reply.
+    await delete_timer_command(message)
+
     if not message.from_user or not await is_group_admin(message.from_user.id):
         await send_temporary_topic_message(
             message,
@@ -527,6 +546,7 @@ async def handle_timer_command(message, current_topic):
         return True
 
     target_user_id = None
+    target_user_name = None
 
     if len(parts) == 1:
         if not message.reply_to_message:
@@ -546,6 +566,7 @@ async def handle_timer_command(message, current_topic):
             return True
 
         target_user_id = replied.from_user.id
+        target_user_name = replied.from_user.full_name
 
     elif len(parts) == 2 and parts[1].lower() == "all":
         async with db_pool.acquire() as connection:
@@ -569,6 +590,17 @@ async def handle_timer_command(message, current_topic):
             target_user_id = int(parts[1])
             if target_user_id <= 0:
                 raise ValueError
+            # При сбросе по числовому ID пробуем получить имя через Telegram.
+            # Если Telegram не отдаст профиль, используем сам ID как подпись ссылки.
+            try:
+                target_chat = await bot.get_chat(target_user_id)
+                target_user_name = (
+                    getattr(target_chat, "full_name", None)
+                    or getattr(target_chat, "first_name", None)
+                    or str(target_user_id)
+                )
+            except TelegramAPIError:
+                target_user_name = str(target_user_id)
         except ValueError:
             await send_temporary_topic_message(
                 message,
@@ -592,9 +624,11 @@ async def handle_timer_command(message, current_topic):
             current_topic
         )
 
+    display_name = escape(target_user_name or str(target_user_id))
     await send_temporary_topic_message(
         message,
-        f"✅ Таймер пользователя <code>{target_user_id}</code> "
+        f"✅ Таймер пользователя "
+        f'<a href="tg://user?id={target_user_id}">{display_name}</a> '
         f"в этой теме сброшен."
     )
     logger.info(
