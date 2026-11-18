@@ -516,17 +516,13 @@ async def handle_timer_command(message, current_topic):
             message.from_user.id,
             current_topic
         )
-        topic_name = COOLDOWN_TOPIC_NAMES[current_topic]
-
         if remaining > 0:
             response = (
-                f"⏳ В теме «{escape(topic_name)}» до следующей публикации "
-                f"осталось <b>{format_remaining(remaining)}</b>."
+                f"⏳ В этой теме до следующей публикации осталось "
+                f"<b>{format_remaining(remaining)}</b>."
             )
         else:
-            response = (
-                f"✅ В теме «{escape(topic_name)}» публикация разрешена."
-            )
+            response = "✅ В этой теме публикация разрешена."
 
         await send_temporary_topic_message(message, response)
         return True
