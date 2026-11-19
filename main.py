@@ -8,6 +8,8 @@ import re
 from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
+
+from redis.asyncio import Redis
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiohttp import web
@@ -40,6 +42,7 @@ RENDER_EXTERNAL_URL = os.getenv(
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
 TEST_MODE = os.getenv("TEST_MODE", "true").strip().lower() in ("1", "true", "yes", "on")
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -69,6 +72,7 @@ COOLDOWN_TOPIC_NAMES = {
 COOLDOWN_TOPIC_IDS = set(COOLDOWN_TOPIC_NAMES)
 
 db_pool = None
+redis_client = None
 
 
 # ==================================================
@@ -89,6 +93,7 @@ update_lock = asyncio.Lock()
 # ==================================================
 
 background_tasks = set()
+persistence_tasks = set()
 
 BOT_ID = None
 
@@ -254,6 +259,28 @@ def create_background_task(coro):
     return task
 
 
+def create_persistence_task(coro):
+    """Отдельно отслеживает записи в Neon, чтобы сброс/остановка их не потеряли."""
+    task = asyncio.create_task(coro)
+    persistence_tasks.add(task)
+
+    def finished(completed):
+        persistence_tasks.discard(completed)
+        if completed.cancelled():
+            return
+        error = completed.exception()
+        if error:
+            logger.error("Фоновая запись таймера завершилась ошибкой: %s", error)
+
+    task.add_done_callback(finished)
+    return task
+
+
+async def wait_for_persistence_tasks():
+    if persistence_tasks:
+        await asyncio.gather(*list(persistence_tasks), return_exceptions=True)
+
+
 def get_topic_link(topic_id):
 
     if not topic_id:
@@ -273,11 +300,16 @@ def get_topic_link(topic_id):
 # ==================================================
 
 async def init_database():
-    global db_pool
+    global db_pool, redis_client
 
     if not DATABASE_URL:
         raise RuntimeError(
             "Не задан DATABASE_URL. Добавьте Neon connection string "
+            "в Render → Environment."
+        )
+    if not REDIS_URL:
+        raise RuntimeError(
+            "Не задан REDIS_URL. Добавьте Upstash Redis URL "
             "в Render → Environment."
         )
 
@@ -326,8 +358,131 @@ async def init_database():
             """
         )
 
+    redis_client = Redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+        health_check_interval=30,
+    )
     logger.info("Подключение main.py к Neon PostgreSQL успешно.")
     logger.info("Таблица announcement_timers проверена/создана.")
+    try:
+        await redis_client.ping()
+        logger.info("Подключение main.py к Upstash Redis успешно.")
+        # При старте прогреваем Redis активными таймерами из Neon.
+        await hydrate_redis_timers()
+    except Exception:
+        # Не останавливаем бота при временной недоступности Redis:
+        # операции таймеров смогут использовать Neon как резервный путь.
+        logger.exception("Upstash Redis пока недоступен; включён резервный режим Neon.")
+
+
+REDIS_TIMER_PREFIX = "gamefloid:announcement_timer:"
+REDIS_REGISTER_SCRIPT = """
+local current = redis.call('GET', KEYS[1])
+if current then
+    local split_at = string.find(current, '|', 1, true)
+    local old_message = current
+    local old_group = ''
+    if split_at then
+        old_message = string.sub(current, 1, split_at - 1)
+        old_group = string.sub(current, split_at + 1)
+    end
+    if old_message == ARGV[1] or (ARGV[2] ~= '' and old_group == ARGV[2]) then
+        return {1, 0, 0}
+    end
+    return {0, redis.call('TTL', KEYS[1]), 0}
+end
+redis.call('SET', KEYS[1], ARGV[1] .. '|' .. ARGV[2], 'EX', ARGV[3], 'NX')
+return {1, 0, 1}
+"""
+
+
+def redis_timer_key(user_id, topic_id):
+    return f"{REDIS_TIMER_PREFIX}{user_id}:{topic_id}"
+
+
+async def hydrate_redis_timers():
+    """Загружает действующие таймеры из Neon в Redis, не перезаписывая Redis."""
+    if db_pool is None or redis_client is None:
+        return
+
+    async with db_pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+                user_id,
+                topic_id,
+                last_message_id,
+                COALESCE(last_media_group_id, '') AS media_group_id,
+                GREATEST(
+                    0,
+                    CEIL(EXTRACT(EPOCH FROM (
+                        published_at + INTERVAL '5 hours' - NOW()
+                    )))
+                )::BIGINT AS remaining
+            FROM announcement_timers
+            WHERE published_at > NOW() - INTERVAL '5 hours'
+            """
+        )
+
+    pipe = redis_client.pipeline(transaction=False)
+    queued = 0
+    for row in rows:
+        remaining = int(row["remaining"] or 0)
+        if remaining <= 0:
+            continue
+        key = redis_timer_key(row["user_id"], row["topic_id"])
+        value = f"{row['last_message_id']}|{row['media_group_id']}"
+        pipe.set(key, value, ex=remaining, nx=True)
+        queued += 1
+    if queued:
+        await pipe.execute()
+    logger.info("Redis прогрет активными таймерами из Neon: %s", queued)
+
+
+async def persist_announcement_timer(
+    user_id, topic_id, message_id, media_group_id, published_at
+):
+    """Сохраняет успешно установленный Redis-таймер в постоянную базу Neon."""
+    for attempt in range(1, 4):
+        try:
+            if db_pool is None:
+                raise RuntimeError("Neon pool не инициализирован")
+            async with db_pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO announcement_timers (
+                        user_id, topic_id, published_at,
+                        last_message_id, last_media_group_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (user_id, topic_id)
+                    DO UPDATE SET
+                        published_at = EXCLUDED.published_at,
+                        last_message_id = EXCLUDED.last_message_id,
+                        last_media_group_id = EXCLUDED.last_media_group_id
+                    """,
+                    user_id,
+                    topic_id,
+                    published_at,
+                    message_id,
+                    media_group_id,
+                )
+            logger.info(
+                "Таймер сохранён в Neon: user_id=%s topic_id=%s",
+                user_id, topic_id
+            )
+            return
+        except Exception:
+            logger.exception(
+                "Не удалось сохранить Redis-таймер в Neon (попытка %s/3)",
+                attempt
+            )
+            if attempt < 3:
+                await asyncio.sleep(attempt * 2)
+
 
 
 def format_remaining(seconds):
@@ -337,72 +492,41 @@ def format_remaining(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-async def register_announcement(user_id, topic_id, message_id, media_group_id=None):
-    """
-    Атомарно регистрирует публикацию.
-    Возвращает (True, 0) при разрешённой публикации,
-    (False, remaining_seconds) при активном таймере.
-    Повторная доставка того же Telegram message_id не продлевает таймер.
-    """
-    if db_pool is None:
-        raise RuntimeError("Neon PostgreSQL ещё не инициализирован.")
-
+async def register_announcement_neon(user_id, topic_id, message_id, media_group_id=None):
+    """Резервная атомарная проверка через Neon, если Redis временно недоступен."""
     lock_key = f"announcement:{user_id}:{topic_id}"
-
     async with db_pool.acquire() as connection:
         async with connection.transaction():
             await connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                lock_key
+                lock_key,
             )
-
             current = await connection.fetchrow(
                 """
-                SELECT
-                    last_message_id,
-                    last_media_group_id,
-                    GREATEST(
-                        0,
-                        CEIL(EXTRACT(
-                            EPOCH FROM (
-                                published_at
-                                + INTERVAL '5 hours'
-                                - NOW()
-                            )
-                        ))
-                    )::BIGINT AS remaining
+                SELECT last_message_id, last_media_group_id,
+                    GREATEST(0, CEIL(EXTRACT(EPOCH FROM (
+                        published_at + INTERVAL '5 hours' - NOW()
+                    ))))::BIGINT AS remaining
                 FROM announcement_timers
                 WHERE user_id = $1 AND topic_id = $2
                 """,
                 user_id,
-                topic_id
+                topic_id,
             )
-
             if current:
-                # Защита от повторной доставки того же сообщения после рестарта.
-                if current["last_message_id"] == message_id:
-                    return True, 0
-
-                if (
-                    media_group_id
-                    and current["last_media_group_id"] == media_group_id
+                if current["last_message_id"] == message_id or (
+                    media_group_id and current["last_media_group_id"] == media_group_id
                 ):
                     return True, 0
-
                 remaining = int(current["remaining"] or 0)
                 if remaining > 0:
                     return False, remaining
-
             await connection.execute(
                 """
                 INSERT INTO announcement_timers (
-                    user_id,
-                    topic_id,
-                    published_at,
-                    last_message_id,
-                    last_media_group_id
-                )
-                VALUES ($1, $2, NOW(), $3, $4)
+                    user_id, topic_id, published_at,
+                    last_message_id, last_media_group_id
+                ) VALUES ($1, $2, NOW(), $3, $4)
                 ON CONFLICT (user_id, topic_id)
                 DO UPDATE SET
                     published_at = EXCLUDED.published_at,
@@ -412,37 +536,144 @@ async def register_announcement(user_id, topic_id, message_id, media_group_id=No
                 user_id,
                 topic_id,
                 message_id,
-                media_group_id
+                media_group_id,
             )
-
             return True, 0
 
 
-async def get_announcement_remaining(user_id, topic_id):
+async def register_announcement(user_id, topic_id, message_id, media_group_id=None):
+    """Атомарная быстрая проверка через Redis с постоянной записью в Neon."""
     if db_pool is None:
-        raise RuntimeError("Neon PostgreSQL ещё не инициализирован.")
+        raise RuntimeError("Neon ещё не инициализирован.")
+    if redis_client is None:
+        return await register_announcement_neon(
+            user_id, topic_id, message_id, media_group_id
+        )
+
+    key = redis_timer_key(user_id, topic_id)
+    media_group_id = media_group_id or ""
+    try:
+        # Обычный повторный пост блокируется Redis без обращения к Neon.
+        current_ttl = await redis_client.ttl(key)
+        if current_ttl > 0:
+            current = await redis_client.get(key)
+            if current:
+                old_message, _, old_group = current.partition("|")
+                if old_message == str(message_id) or (
+                    media_group_id and old_group == media_group_id
+                ):
+                    return True, 0
+                return False, current_ttl
+
+        # Cache miss: сверяемся с Neon, чтобы не пропустить старый таймер.
+        async with db_pool.acquire() as connection:
+            current = await connection.fetchrow(
+                """
+                SELECT last_message_id, last_media_group_id,
+                    GREATEST(0, CEIL(EXTRACT(EPOCH FROM (
+                        published_at + INTERVAL '5 hours' - NOW()
+                    ))))::BIGINT AS remaining
+                FROM announcement_timers
+                WHERE user_id = $1 AND topic_id = $2
+                """,
+                user_id,
+                topic_id,
+            )
+
+        if current:
+            remaining = int(current["remaining"] or 0)
+            if remaining > 0:
+                if (
+                    current["last_message_id"] == message_id
+                    or (media_group_id and current["last_media_group_id"] == media_group_id)
+                ):
+                    value = f"{message_id}|{media_group_id}"
+                    await redis_client.set(key, value, ex=remaining, nx=True)
+                    return True, 0
+                value = (
+                    f"{current['last_message_id']}|"
+                    f"{current['last_media_group_id'] or ''}"
+                )
+                await redis_client.set(key, value, ex=remaining, nx=True)
+
+        published_at = datetime.now(timezone.utc)
+        result = await redis_client.eval(
+            REDIS_REGISTER_SCRIPT,
+            1,
+            key,
+            str(message_id),
+            media_group_id,
+            COOLDOWN_SECONDS,
+        )
+        allowed = bool(int(result[0]))
+        remaining = int(result[1] or 0)
+        newly_registered = bool(int(result[2]))
+        if not allowed:
+            return False, max(1, remaining)
+        if newly_registered:
+            create_persistence_task(
+                persist_announcement_timer(
+                    user_id,
+                    topic_id,
+                    message_id,
+                    media_group_id or None,
+                    published_at,
+                )
+            )
+        return True, 0
+    except Exception:
+        logger.exception("Redis ошибка при проверке объявления; используем Neon.")
+        return await register_announcement_neon(
+            user_id, topic_id, message_id, media_group_id or None
+        )
+
+
+async def get_announcement_remaining(user_id, topic_id):
+    if redis_client is None or db_pool is None:
+        raise RuntimeError("Redis/Neon ещё не инициализированы.")
+
+    key = redis_timer_key(user_id, topic_id)
+    try:
+        remaining = await redis_client.ttl(key)
+        if remaining > 0:
+            return remaining
+        if remaining == -1:
+            # Защита от ключа без TTL: восстанавливаем безопасный срок.
+            await redis_client.expire(key, COOLDOWN_SECONDS)
+            return COOLDOWN_SECONDS
+    except Exception:
+        logger.exception("Ошибка чтения таймера из Redis; используем Neon")
 
     async with db_pool.acquire() as connection:
-        remaining = await connection.fetchval(
+        row = await connection.fetchrow(
             """
-            SELECT GREATEST(
-                0,
-                CEIL(EXTRACT(
-                    EPOCH FROM (
-                        published_at
-                        + INTERVAL '5 hours'
-                        - NOW()
-                    )
-                ))
-            )::BIGINT
+            SELECT last_message_id,
+                COALESCE(last_media_group_id, '') AS media_group_id,
+                GREATEST(0, CEIL(EXTRACT(EPOCH FROM (
+                    published_at + INTERVAL '5 hours' - NOW()
+                ))))::BIGINT AS remaining
             FROM announcement_timers
             WHERE user_id = $1 AND topic_id = $2
             """,
             user_id,
-            topic_id
+            topic_id,
         )
 
-    return int(remaining or 0)
+    if not row:
+        return 0
+
+    remaining = int(row["remaining"] or 0)
+    if remaining > 0:
+        try:
+            await redis_client.set(
+                key,
+                f"{row['last_message_id']}|{row['media_group_id']}",
+                ex=remaining,
+                nx=True,
+            )
+        except Exception:
+            logger.exception("Не удалось заполнить Redis-кэш таймера")
+    return remaining
 
 
 async def is_group_admin(user_id):
@@ -564,11 +795,18 @@ async def handle_timer_command(message, current_topic):
         target_user_name = replied.from_user.full_name
 
     elif len(parts) == 2 and parts[1].lower() == "all":
+        await wait_for_persistence_tasks()
         async with db_pool.acquire() as connection:
             result = await connection.execute(
                 "DELETE FROM announcement_timers WHERE topic_id = ANY($1::BIGINT[])",
                 list(COOLDOWN_TOPIC_IDS)
             )
+        if redis_client is not None:
+            keys = [key async for key in redis_client.scan_iter(
+                match=f"{REDIS_TIMER_PREFIX}*", count=500
+            )]
+            if keys:
+                await redis_client.delete(*keys)
         await send_temporary_topic_message(
             message,
             "✅ Таймеры всех пользователей во всех девяти темах сброшены."
@@ -609,6 +847,7 @@ async def handle_timer_command(message, current_topic):
         )
         return True
 
+    await wait_for_persistence_tasks()
     async with db_pool.acquire() as connection:
         await connection.execute(
             """
@@ -618,6 +857,8 @@ async def handle_timer_command(message, current_topic):
             target_user_id,
             current_topic
         )
+    if redis_client is not None:
+        await redis_client.delete(redis_timer_key(target_user_id, current_topic))
 
     display_name = escape(target_user_name or str(target_user_id))
     await send_temporary_topic_message(
@@ -1478,6 +1719,8 @@ async def main_async():
             "Остановка бота"
         )
 
+        await wait_for_persistence_tasks()
+
         for task in list(background_tasks):
             task.cancel()
 
@@ -1487,6 +1730,10 @@ async def main_async():
                 await task
 
         await runner.cleanup()
+
+        if redis_client is not None:
+            await redis_client.aclose()
+            logger.info("Подключение main.py к Upstash Redis закрыто.")
 
         if db_pool is not None:
             await db_pool.close()
