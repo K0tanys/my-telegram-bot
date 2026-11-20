@@ -709,6 +709,56 @@ async def send_temporary_topic_message(message, text):
         logger.exception("Не удалось отправить ответ команды таймера")
 
 
+async def send_global_timer_amnesty(admin_user):
+    """Рассылает уведомление об общей амнистии в 9 тем объявлений и чат общения."""
+    if admin_user.username:
+        admin_label = f"@{html.escape(admin_user.username)}"
+    else:
+        admin_label = html.escape(admin_user.full_name or "Администратор")
+
+    admin_mention = (
+        f'<a href="tg://user?id={admin_user.id}">{admin_label}</a>'
+    )
+    text = (
+        "<b>🎉 ОБЩАЯ АМНИСТИЯ!</b>\n\n"
+        "Администрация GameFloid обнулила все таймеры публикаций.\n\n"
+        "✅ Теперь каждый пользователь может повторно подать своё объявление, "
+        "не дожидаясь окончания предыдущего таймера.\n\n"
+        "📢 Все категории объявлений снова открыты для публикаций!\n\n"
+        f"<b>Амнистию провёл:</b> {admin_mention}"
+    )
+
+    # Девять рекламных тем плюс отдельная тема общения.
+    destination_topics = [ALLOWED_TOPIC_ID, *sorted(COOLDOWN_TOPIC_IDS)]
+    sent_count = 0
+
+    for topic_id in destination_topics:
+        try:
+            sent = await bot.send_message(
+                chat_id=TARGET_GROUP_ID,
+                message_thread_id=topic_id,
+                text=text,
+                disable_web_page_preview=True
+            )
+            sent_count += 1
+            create_background_task(
+                cleanup_warning(TARGET_GROUP_ID, sent.message_id)
+            )
+        except TelegramAPIError:
+            logger.exception(
+                "Не удалось отправить уведомление об амнистии в тему %s",
+                topic_id
+            )
+
+    logger.info(
+        "Глобальная амнистия: администратор %s; уведомления отправлены %s/%s",
+        admin_user.id,
+        sent_count,
+        len(destination_topics)
+    )
+    return sent_count, len(destination_topics)
+
+
 async def delete_timer_command(message):
     """Удаляет команду управления таймером после её распознавания."""
     try:
@@ -807,14 +857,16 @@ async def handle_timer_command(message, current_topic):
             )]
             if keys:
                 await redis_client.delete(*keys)
-        await send_temporary_topic_message(
-            message,
-            "✅ Таймеры всех пользователей во всех девяти темах сброшены."
+        sent_count, total_topics = await send_global_timer_amnesty(
+            message.from_user
         )
         logger.info(
-            "Администратор %s сбросил все таймеры. DB result: %s",
+            "Администратор %s сбросил все таймеры. DB result: %s. "
+            "Уведомления: %s/%s тем.",
             message.from_user.id,
-            result
+            result,
+            sent_count,
+            total_topics
         )
         return True
 
