@@ -710,7 +710,7 @@ async def send_temporary_topic_message(message, text):
 
 
 async def send_global_timer_amnesty(admin_user):
-    """Рассылает уведомление об общей амнистии в 9 тем объявлений и чат общения."""
+    """Рассылает постоянное уведомление об амнистии в 9 тем и чат общения."""
     if admin_user.username:
         admin_label = f"@{html.escape(admin_user.username)}"
     else:
@@ -721,10 +721,8 @@ async def send_global_timer_amnesty(admin_user):
     )
     text = (
         "<b>🎉 ОБЩАЯ АМНИСТИЯ!</b>\n\n"
-        "Администрация GameFloid обнулила все таймеры публикаций.\n\n"
-        "✅ Теперь каждый пользователь может повторно подать своё объявление, "
-        "не дожидаясь окончания предыдущего таймера.\n\n"
-        "📢 Все категории объявлений снова открыты для публикаций!\n\n"
+        "Администрация провела общую амнистию и сбросила все таймеры публикаций.\n\n"
+        "✅ Теперь вы можете снова подать объявление!\n\n"
         f"<b>Амнистию провёл:</b> {admin_mention}"
     )
 
@@ -741,9 +739,8 @@ async def send_global_timer_amnesty(admin_user):
                 disable_web_page_preview=True
             )
             sent_count += 1
-            create_background_task(
-                cleanup_warning(TARGET_GROUP_ID, sent.message_id)
-            )
+            # Важное объявление об амнистии остаётся в теме навсегда:
+            # не ставим его в очередь на удаление и не редактируем после отправки.
         except TelegramAPIError:
             logger.exception(
                 "Не удалось отправить уведомление об амнистии в тему %s",
