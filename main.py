@@ -34,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-1004474106112"))
 
 RENDER_EXTERNAL_URL = os.getenv(
     "RENDER_EXTERNAL_URL", ""
